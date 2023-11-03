@@ -1,0 +1,3822 @@
+---
+title: "704_Horse_Racing"
+author: "Jacob Bales-Neville"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Users/jbale/Google Drive/Uni/2023/Semester 2/Advanced Project 2")
+
+library(RNetCDF)
+library(ggplot2)
+library(dplyr)
+library(raster)
+library(abind)
+library(vtable)
+library(lubridate)
+library(data.table)
+library(hexbin)
+library(RColorBrewer)
+library(forcats)
+library(hrbrthemes)
+library(viridis)
+```
+
+```{r}
+
+data <- read.csv("ThoroughbredsAustralia_probs.csv")
+```
+
+```{r}
+str(data)
+```
+
+```{r}
+#ensuring variables are correct data type
+to_factor <- c('level','venuename','state', 'track_condition', 'age_restrictions', 'sex_restrictions','barrier_bin', 'ExpPirCat')
+
+data_clean <- data %>%
+  mutate(across(to_factor, as.factor))
+
+
+```
+
+
+```{r}
+#convert date variable to date format
+
+data_clean$meetingdate <- lubridate::dmy(data_clean$meetingdate)
+data_clean$birth_date <- lubridate::dmy(data_clean$birth_date)
+
+```
+
+```{r}
+# remove irrelevant variables
+
+#looking for variables that don't vary throughout the data set
+ulst <- lapply(data_clean, unique)
+
+k <- lengths(ulst)
+
+# event_type_name has only 2 values (thoroughbred and NA) - this provides no information and will be removed
+
+data_clean = subset(data_clean, select = -c(venue_type_name))
+```
+
+
+```{r}
+sumtable(data_clean, )
+```
+
+```{r}
+sum(data_clean$handicap == 0)
+
+handicap_sort <- data_clean[order(data_clean$handicap),]
+
+## remove rows with handicap as zero
+## row 142719
+## row 148828
+
+## remove trainer_id
+## remove jockey_id
+## remove competitor_id
+## remove event_competitor_id
+## remove country_name
+## remove event_number
+## remove program_number
+
+
+## Notes
+# API and prize_money is very positively skewed
+## quite a few horses with extremely long time since last race. In excess of a year and up to 9 years
+## this is increasing the mean of DSLR1 to be greater than DSLR2 and DSLR3, as these horses seem to have only
+## run one race previously
+
+## 999 or -999 values for finish time, not recorded properly, horse didn't finish
+## -99 values for finish position
+## some very high odds skewing mean of sb_prembl
+```
+
+```{r}
+# remove rows where handicap is zero - errors
+data_clean <- subset(data_clean, raceid != data_clean$raceid[142718] & raceid != data_clean$raceid[148828])
+
+# remove unneeded identification variables from data set
+data_clean <- subset(data_clean, select = -c(trainer_id, jockey_id, competitor_id, event_competitor_id, country_name, event_number, program_number))
+
+```
+
+
+```{r}
+# Define conditions for deletion
+# column_name is columns which have erroneous values
+# target_value are the erroneous values
+conditions <- list(
+  list(column_name = "finish_time", target_value = c(-999,999)),
+  list(column_name = "finish_position", target_value = -99),
+  list(column_name = "race_t6", target_value = c(-999,999)),
+  list(column_name = "race_l6", target_value = -998:998),
+  list(column_name = "race_time", target_value = -998:998)
+  #e200ave and early have a lot of 999 values, so have left them for now.
+  #Unsure what these variables mean
+  #list(column_name = "e200ave", target_value = -998: 998)
+  #list(column_name = "early", target_value = 999)
+
+
+)
+
+# Iterate over conditions and remove matching rows
+for (condition in conditions) {
+  column_name <- condition$column_name
+  target_value <- condition$target_value
+  
+  # Find row indices where the specified column equals the target value
+  matching_rows <- which(data_clean[[column_name]] %in% target_value)
+  
+  # Remove the matching rows from the dataframe
+  data_clean <- data_clean[-matching_rows, ]
+}
+```
+
+```{r}
+## Dealing with Na's
+# https://stats.stackexchange.com/questions/11000/how-does-r-handle-missing-values-in-lm
+na_counts <- colSums(is.na(data_clean))
+```
+
+```{r}
+# Removing races where there are NA values for final odds or finish position
+# Cannot have NA values for these variables as they are target variables in different parts of the analysis.
+conditions <- list(
+  list(column_name = "sb_final"),
+  list(column_name = "finish_position")
+)
+
+# Iterate over conditions and remove rows with NA values in the specified columns
+for (condition in conditions) {
+  column_name <- condition$column_name
+  
+  # Find row indices where the specified column contains NA values
+  matching_rows <- which(is.na(data_clean[[column_name]]))
+  
+  # Remove the matching rows from the dataframe
+  data_clean <- data_clean[-matching_rows, ]
+}
+```
+
+```{r}
+# Remove variables where number of NA values is above a threshold
+max_na_percentage <- 0.2  # 20%
+
+# Calculate the threshold number of NA values
+threshold_na <- nrow(data_clean) * max_na_percentage
+
+# Remove columns with more NA values than the threshold
+data_clean <- data_clean[, colSums(is.na(data_clean)) <= threshold_na]
+```
+
+```{r}
+# remove observations with N/A values
+data_clean2 <- na.omit(data_clean)
+```
+
+
+```{r}
+# re-investigate summary statistics
+sumtable(data_clean, )
+```
+
+```{r}
+#data exploration
+
+#subset data into data types
+# Specify the datatypes you want to subset (numeric and integer)
+num_datatypes <- c("numeric", "integer")
+
+# Use sapply to check the datatype of each column
+column_datatypes <- sapply(data_clean2, class)
+
+# Subset columns based on the desired datatypes
+num_data_clean <- data_clean[, column_datatypes %in% num_datatypes]
+
+```
+
+
+## data exploration
+
+```{r}
+n_distinct(data$trainer)
+```
+```{r}
+n_distinct(data$jockey)
+```
+```{r}
+n_distinct(data$runner)
+```
+
+```{r}
+#data exploration
+
+#subset data into data types
+# Specify the datatypes you want to subset (numeric and integer)
+cat_datatypes <- "factor"
+
+# Use sapply to check the datatype of each column
+column_datatypes_cat <- sapply(data_clean, class)
+
+# Subset columns based on the desired datatypes
+cat_data_clean <- data_clean[, column_datatypes_cat %in% cat_datatypes]
+
+```
+
+```{r}
+cat_data_clean$runner <- data_clean$runner
+cat_data_clean$jockey <- data_clean$jockey
+cat_data_clean$trainer <- data_clean$trainer
+```
+
+
+
+
+```{r}
+#remove variables where correlation is not a valid measure
+num_data_clean <- subset(num_data_clean, select = -c(X.2, X.1, meetingid, bettrackid, racenumber, tabno, event_id, start_time))
+```
+
+
+```{r}
+#correlation
+cormat <- round(cor(num_data_clean),1)
+# Get upper triangle of the correlation matrix and reshape
+get_upper_tri <- function(cormat){
+  cormat[lower.tri(cormat)]<- NA
+  return(cormat)
+}
+```
+
+
+```{r}
+upper_tri <- get_upper_tri(cormat)
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+ggplot(data = melted_cormat, aes(Var2, Var1, fill = value))+
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white",
+                       midpoint = 0, limit = c(-1,1),
+                       space = "Lab",
+                       name="Pearson Correlation") +
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1,
+                                   size = 9, hjust = 1))+
+  coord_fixed()+
+  geom_text(aes(Var2, Var1, label = value),
+           color = "black", size = 2)+
+  labs(title = "Correlation between continous variables")
+```
+```{r}
+cor_matrix <- cor(num_data_clean)
+
+upper_triangle <- upper.tri(cor_matrix, diag = FALSE)
+
+
+# Get the row and column indices of the upper triangle
+row_indices <- row(cor_matrix)[upper_triangle]
+col_indices <- col(cor_matrix)[upper_triangle]
+
+# Get the correlation values in the upper triangle
+cor_values <- cor_matrix[upper_triangle]
+
+# Create a dataframe to store the correlation information
+cor_info <- data.frame(
+  Variable_A = colnames(num_data_clean)[row_indices],
+  Variable_B = colnames(num_data_clean)[col_indices],
+  Correlation = cor_values
+)
+
+# Sort the correlations in absolute value order
+cor_info <- cor_info[order(abs(cor_info$Correlation), decreasing = TRUE), ]
+```
+
+```{r}
+num_data_clean <- subset(num_data_clean, select = -c(rail2, Mprice, itime2f, manual_bm, early, rail4, rail6, rail8))
+```
+
+
+```{r}
+#creating a variable that indicates whether the horse won
+num_data_clean$win <- num_data_clean$finish_position == 1
+```
+
+```{r}
+#creating a variable that indicates whether the horse won
+num_data_clean$place <- num_data_clean$finish_position == 2 | num_data_clean$finish_position == 3
+```
+
+```{r}
+num_data_clean$result <- ifelse(num_data_clean$finish_position == 1, "Winner",
+                                ifelse(num_data_clean$finish_position %in% c(2, 3), "Place", "Not placed"))
+
+
+```
+
+
+```{r}
+combined_data <- cbind(num_data_clean, cat_data_clean)
+```
+
+
+```{r}
+# Using random samples to explore relationship between variables
+# 
+num_samples <- 1000  # Change this to the number of samples you want
+
+# Randomly select 'num_samples' rows from the dataframe
+random_samples <- combined_data[sample(nrow(num_data_clean), num_samples), ]
+```
+
+
+```{r}
+## data visualisation
+ggplot(data = random_samples, aes(x = log(API), y = Jockey_Rating)) +
+  geom_point(aes(color = result))
+
+```
+
+```{r}
+## data visualisation
+ggplot(data = random_samples, aes(x = log(API), y = Jockey_Rating)) +
+  geom_point(aes(color = level))
+
+```
+```{r}
+ggplot(data = random_samples, aes(x = Jockey_Rating, y = probs)) +
+  geom_point(aes(color = result))
+```
+
+```{r}
+ggplot(data = random_samples, aes(x = DSLR, y = WinRate)) +
+  geom_point(aes(color = win))
+```
+
+```{r}
+ggplot(data = random_samples, aes(x = handicap, y = Jockey_Rating)) +
+  geom_point(aes(color = win))
+```
+```{r}
+ggplot(data = random_samples, aes(x = SPLS, y = probs)) +
+  geom_point(aes(color = win))
+```
+
+```{r}
+ggplot(data = random_samples, aes(x = Jockey_Rating, y = WinRate)) +
+  geom_point(aes(color = win))
+```
+
+
+## Distribution plots
+```{r}
+ggplot(combined_data, aes(x=log(API), color=result, fill=result)) +
+geom_density(alpha=0.3) +
+  ggtitle("Distribution of the logarithm of prize money categorised by race result") +
+  xlab("Log of prize money (API)") +
+  ylab("Density") +
+  theme_bw()
+```
+
+
+```{r}
+ggplot(combined_data, aes(x=API, color=result, fill=result)) +
+geom_density(alpha=0.3)
+```
+
+
+
+
+```{r}
+ggplot(combined_data, aes(x=WinRate, color=result, fill=result)) +
+geom_density(alpha=0.3)
+```
+
+```{r}
+ggplot(combined_data, aes(x= Jockey_Rating, color=result, fill=result)) +
+geom_density(alpha=0.3) +
+  ggtitle("Distribution of jockey rating categorised by race result") +
+  ylab("Density") +
+  xlab("Jockey Rating") +
+  theme_bw()
+```
+
+```{r}
+ggplot(combined_data, aes(x=ExpPir, color=result, fill=result)) +
+geom_density(alpha=0.3)
+```
+
+```{r}
+ggplot(combined_data, aes(x=log(DSLR), color=result, fill=result)) +
+geom_density(alpha=0.3)
+```
+
+
+```{r}
+ggplot(combined_data, aes(x=DIST_DIFF, color=win, fill=win)) +
+geom_density(alpha=0.3)
+```
+
+```{r}
+ggplot(combined_data, aes(x=log(sb_final), color=result, fill=result)) +
+geom_density(alpha=0.3) +
+  ggtitle("Distribtuion of log of final sports bet odds categorised by race result")+
+  ylab("Density") +
+  xlab("Log of final sports bet odds")+
+  theme_bw()
+```
+
+```{r}
+ggplot(combined_data, aes(x=probs, color=result, fill=result)) +
+geom_density(alpha=0.3)
+```
+
+```{r}
+# hexbin plot 
+# https://r-graph-gallery.com/100-high-density-scatterplot-with-binning.html
+
+bin<-hexbin(combined_data$Jockey_Rating, combined_data$PlaceRate, xbins=40)
+my_colors=colorRampPalette(rev(brewer.pal(11,'Spectral')))
+plot(bin, main="" , colramp=my_colors , legend=F )
+
+```
+
+```{r}
+# bubble plots?
+# violin plots
+```
+
+```{r}
+#violin plot
+# https://r-graph-gallery.com/violin_grouped_ggplot2.html
+combined_data %>%
+  ggplot(aes(fill=result, y = WinRate, x = barrier_bin )) +
+    geom_violin(position = "dodge", alpha = 0.5) +
+    theme_ipsum()  +
+    xlab("")
+```
+
+```{r}
+#violin plot
+combined_data %>%
+  ggplot(aes(fill=result, y = probs, x = track_condition )) +
+    geom_violin(position = "dodge", alpha = 0.5) +
+    theme_ipsum()  +
+    xlab("")
+```
+
+```{r}
+ggplot(combined_data, aes(x = NRUNS)) +
+  geom_density() +
+  theme_classic()
+```
+
+
+
+```{r}
+str(data_clean2)
+```
+
+
+
+
+
+
+```{r}
+
+#scaled odds
+combined_data$raceid
+races <- unique(combined_data$raceid)
+head(races)
+for(i in 1:length(races)){
+  filter<-races[i]==combined_data$raceid
+  score<-1/combined_data$sb_final[filter]
+  scoreScaled<-score/sum(score)
+  combined_data$scaled[filter]<-scoreScaled
+}
+```
+
+## Modelling
+
+### Full Model
+```{r}
+# separate model data - data that is available before race starts
+
+# removing variables unknown before race
+pre_race_model_data = subset(combined_data, select =-c(result, raceid, barrier_bin,result, place, probs, finish_time, MEETRANKftime2,MEETRANKftime4, MEETRANKftime6, MEETRANKftime8, ftime2, ftime4, ftime6, ftime8, ftime10, marg600, marg400, margfin, pos400, pos600, itime86, itime64, itime42, e200ave, t800_400, finish_position, XXX, XX, X, PPP, PP, P, MTC))
+
+# 60% train, 40% test
+total_rows <- nrow(pre_race_model_data)
+train_rows <- round(0.6 * total_rows)
+
+#split data into train and test split, using sequential split
+train_set <- pre_race_model_data[1:train_rows, ]
+test_set <- pre_race_model_data[(train_rows + 1):total_rows, ]
+
+
+
+
+```
+
+```{r}
+# full model
+full_model <- glm(formula = win ~ ., data = train_set, family = binomial, na.action=na.omit)
+```
+
+
+```{r}
+summary(full_model)
+```
+
+
+
+```{r}
+null_model <- glm(win ~ 1, family = binomial, data = train_set)
+summary(null_model)
+```
+
+```{r}
+## removed sb_final,as scaled is a transformation of it
+sig_model <- glm(win ~ WinRate + Jockey_Rating + SPLS + class_ach_l3 + barrier_margadj  + scaled + age_restrictions, family = binomial, data = train_set)
+
+summary(sig_model)
+
+```
+
+```{r model with confints, include=TRUE}
+#log odds
+(est <- cbind(Estimate = coef(sig_model), confint(sig_model)))
+
+```
+
+#### Odds ratio
+```{r odds ratio,include=TRUE}
+#odds ratio
+(est_exp <- cbind(exp(est)))
+```
+# Evaluation function
+```{r}
+pre_race_model_data_eval = subset(combined_data, select =-c(barrier_bin, place, probs, finish_time, MEETRANKftime2,MEETRANKftime4, MEETRANKftime6, MEETRANKftime8, ftime2, ftime4, ftime6, ftime8, ftime10, marg600, marg400, margfin, pos400, pos600, itime86, itime64, itime42, e200ave, t800_400, finish_position, XXX, XX, X, PPP, PP, P, MTC))
+test_set <- pre_race_model_data_eval[(train_rows + 1):total_rows, ]
+```
+
+
+```{r}
+calculate_accuracies <- function(model, test_data) {
+  # Predictions on the test data
+  predictions <- predict(model, newdata = test_data, type = "response")
+  
+  # Add predicted probabilities to the test data
+  test_data$probs <- predictions
+  
+  # Re-order by ascending raceid
+  test_data <- test_data[order(test_data$raceid), ]
+  
+  test_data$win <- as.numeric(test_data$win)
+  
+  # Convert 'win' to factor with explicit levels
+  test_data$win <- factor(test_data$win, levels = c(0, 1))
+  
+  # Find predicted winner for model
+  test_data <- test_data %>%
+    group_by(raceid) %>%
+    mutate(model_win = as.integer(probs == max(probs)))
+  
+  # Find predicted winner for market
+  test_data <- test_data %>%
+    group_by(raceid) %>%
+    mutate(market_win = as.integer(scaled == max(scaled)))
+  
+  # Calculate test accuracy
+  test_accuracy <- sum(test_data$model_win == test_data$win) / nrow(test_data)
+  
+  # Calculate market accuracy
+  market_accuracy <- sum(test_data$market_win == test_data$win) / nrow(test_data)
+  
+  # Confusion matrix for model_win
+  model_conf_matrix <- table(Actual = test_data$win, Predicted = test_data$model_win)
+  
+  # Precision and recall for model_win
+  model_precision <- model_conf_matrix[2, 2] / sum(model_conf_matrix[, 2])
+  model_recall <- model_conf_matrix[2, 2] / sum(model_conf_matrix[2, ])
+  
+  # Confusion matrix for market_win
+  market_conf_matrix <- table(Actual = test_data$win, Predicted = test_data$market_win)
+  
+  # Precision and recall for market_win
+  market_precision <- market_conf_matrix[2, 2] / sum(market_conf_matrix[, 2])
+  market_recall <- market_conf_matrix[2, 2] / sum(market_conf_matrix[2, ])
+  
+  # Return a list with test and market accuracies, confusion matrices, precision, and recall
+  return(list(test_accuracy = test_accuracy, 
+              market_accuracy = market_accuracy,
+              model_conf_matrix = model_conf_matrix,
+              market_conf_matrix = market_conf_matrix,
+              model_precision = model_precision,
+              model_recall = model_recall,
+              market_precision = market_precision,
+              market_recall = market_recall))
+}
+
+
+
+
+
+
+#High entropy, good track, low handicap, odds
+accuracies <- calculate_accuracies(sig_model, test_set)
+print(accuracies)
+
+```
+
+## Full model validity
+
+
+## Evaluation
+### Test data evaluation
+```{r}
+probs_test <- predict(sig_model, type = "response", 
+                       newdata =test_set)
+```
+
+### Test AUC and ROC
+
+```{r}
+library(pROC)
+logit_m_test <- roc(test_set$win ~ probs_test)
+logit_m_test$auc
+
+#calculate the Gini score
+gini_logit_test <- 2*(logit_m_test$auc - 0.5)
+gini_logit_test
+```
+
+
+## Model Assumptions
+### Linearity
+
+
+```{r}
+ggplot(sig_model_data, aes(index, .std.resid)) + 
+  geom_point(aes(color = win), alpha = .5) +
+  theme_bw()+
+  xlab(" Observation") +
+  ylab( "Standardised residuals") +
+  ggtitle("Residuals (test for independence)")
+
+```
+
+
+```{r}
+
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+merged_data_train_var = subset(merged_data, select= c(win, Jockey_Rating , SPLS , class_ach_l3 , barrier_margadj  , scaled , age_restrictions , avg_l400_benchmark))
+train_data_samp <- sample_n(merged_data_train_var, 500)
+
+probs_train_sample <- predict(new_model, type = "response", 
+                               newdata = train_data_samp)
+num_lin <- train_data_samp %>%
+  select_if(is.numeric) 
+
+predictors <- colnames(num_lin)
+
+# Structuring data for plot using pivot_longer
+num_lin <- num_lin %>%
+  mutate(logit = log(probs_train_sample/(1 - probs_train_sample))) %>%
+  pivot_longer(cols = -logit, names_to = "predictors", values_to = "predictor.value")
+
+# Plotting
+ggplot(num_lin, aes(logit, predictor.value)) +
+  stat_smooth() +
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+### Influential observations
+```{r}
+plot(sig_model, which = 4, id.n = 3)
+```
+
+
+
+
+```{r}
+anova(sig_model, test="Chisq")
+```
+
+
+```{r model assumptions 3, include=TRUE}
+library(DHARMa)
+#simulated residual plots
+res=simulateResiduals(sig_model)
+plot(res)
+
+```
+
+```{r probability plots, include=TRUE}
+predicted_values <- merged_data_train_var
+predicted_values$pred <- predict(new_model, merged_data_train_var, 
+                                 type="response")
+ggplot(data = predicted_values, aes(pred, na.rm = TRUE)) +
+  geom_density() +
+  theme_bw()
+
+
+```
+
+```{r model with confints, include=TRUE}
+#log odds
+(est <- cbind(Estimate = coef(new_model), confint(new_model)))
+
+```
+
+#### Odds ratio
+```{r odds ratio,include=TRUE}
+#odds ratio
+(est_exp <- cbind(exp(est)))
+```
+
+```{r}
+# multi-colinearity present with sb_prembl and sb_postmbl
+car::vif(sig_model)
+```
+
+
+
+
+### Investigating model without final odds
+
+
+
+
+
+```{r}
+merged_data_mdata<- subset(merged_data, select = c(win ,distance , handicap, runners , NRUNS , DSLR , WinRate , Jockey_Rating , Jockey_Rating_D , ExpPir  , PlaceRate , TrackWin , GradeWin , class_ach_l3 , barrier_margadj ,  age_3 ,  venuename , sex_restrictions, raceid, scaled, sb_final, sb_prembl, sb_postmbl, sb_tminus15, sb_tminus10, sb_tminus5, sb_tminus2, sb_tminus1, sb_final, level, state, track_condition))
+
+merged_data_mdata<- na.omit(merged_data_mdata)
+```
+
+
+```{r}
+no_odds_model = glm(win ~ distance + runners + NRUNS + DSLR + handicap + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  venuename + sex_restrictions , family = binomial, data = merged_data_mdata)
+summary(no_odds_model)
+```
+```{r}
+na_counts <- colSums(is.na(merged_data_mdata))
+
+# Print the number of NAs for each column
+print(na_counts)
+```
+
+
+```{r}
+null = glm(win ~ 1, family = binomial, data = merged_data_mdata, na.action=na.omit)
+```
+
+```{r}
+
+
+backwards = step(no_odds_model)
+```
+```{r}
+
+
+f_and_b_step <- step(no_odds_model, data = merged_data, direction="both",                         trace = 0)
+```
+
+```{r}
+summary(f_and_b_step)
+```
+
+```{r}
+non_market_mod <- f_and_b_step
+```
+
+```{r}
+non_market_data <- subset(merged_data_mdata, select = c(scaled,raceid, handicap,distance , runners , NRUNS , DSLR , WinRate , 
+    Jockey_Rating , Jockey_Rating_D , ExpPir , PlaceRate , TrackWin , 
+    GradeWin , class_ach_l3 , barrier_margadj , age_3 , 
+    venuename , sex_restrictions ))
+```
+
+```{r}
+non_market_data_test <- subset(merged_data_mdata, select = c( scaled, raceid,handicap,distance , runners , NRUNS , DSLR , WinRate , 
+    Jockey_Rating , Jockey_Rating_D , ExpPir , PlaceRate , TrackWin , 
+    GradeWin , class_ach_l3 , barrier_margadj , age_3 , 
+    venuename , sex_restrictions ))
+```
+
+```{r}
+#test model
+non_market_model_test <- predict(non_market_mod, non_market_data_test)
+```
+
+```{r}
+summary(non_market_model_test)
+```
+```{r}
+# probabilites for non market model
+non_market_probs = data.frame(probs = predict(non_market_mod, 
+                                      newdata = non_market_data_test,type = "response" 
+                                       ))
+```
+
+
+
+```{r}
+rowa_nonmarket <- rownames(non_market_probs)
+
+rowb_nonmarket <- rownames(non_market_data_test)
+
+#probs_data <- merge()
+
+# add probabilites to dataframe
+predicted_probs_nonmarket <- merge(non_market_probs, non_market_data_test, by = 0, all.x = TRUE)
+```
+
+
+
+```{r}
+#re-order by ascending raceid
+predicted_probs_nonmarket <- predicted_probs_nonmarket[order(predicted_probs_nonmarket$raceid),]
+```
+
+```{r}
+#find predicted winner for model
+predicted_probs_nonmarket <- predicted_probs_nonmarket %>%
+  group_by(raceid) %>%
+  mutate(model_win = as.integer(probs == max(probs)))
+```
+
+```{r}
+#find predicted winner for market
+predicted_probs_nonmarket <- predicted_probs_nonmarket%>%
+  group_by(raceid) %>%
+  mutate(market_win = as.integer(scaled == max(scaled)))
+```
+
+```{r}
+rowa_nonmarket <- rownames(non_market_probs)
+
+rowb_nonmarket <- rownames(data)
+
+#probs_data <- merge()
+
+finish_pos <- merge(non_market_probs, data, by = 0, all.x = TRUE)
+finish_pos <- finish_pos[order(finish_pos$raceid),]
+```
+
+```{r}
+predicted_probs_nonmarket$finish_position = finish_pos$finish_position
+```
+
+```{r}
+colnames(predicted_probs_nonmarket)[colnames(predicted_probs_nonmarket) == "runner.x"] <- "runner"
+```
+
+```{r}
+# count correct for model
+comparison_matrix_nonmarket <- as.matrix(predicted_probs_nonmarket$model_win == predicted_probs_nonmarket$finish_position)
+
+# Count number of matches row by row
+predicted_probs_nonmarket$model_accurate <- rowSums(comparison_matrix_nonmarket)
+#count correct for market
+
+model_accuracy_nonmarket <- predicted_probs_nonmarket %>%
+  summarise(accuracy = sum(model_accurate)/length(model_accurate))
+
+
+#model accuracy
+model_accuracy_nonmarket = sum(predicted_probs_nonmarket$model_accurate, na.rm = TRUE)/n_distinct(predicted_probs_nonmarket$raceid)
+``` 
+
+
+
+
+### Looking at entropy to filter the races
+
+```{r}
+### LOAD FULL DATA SET
+
+merged_data_ent<-as.data.table(merged_data_mdata)
+## LOOP
+races <- unique(merged_data_ent$raceid)
+head(races)
+for(i in 1:length(races)){
+  filter<-races[i]==merged_data_ent$raceid
+  scoreW<- merged_data_ent$scaled[filter]
+  entropy<- scoreW/sum(scoreW)
+  merged_data_ent$PriceLR[filter]<-scoreWnorm
+}
+```
+```{r}
+#
+
+
+
+# Convert to data.table
+merged_data_ent <- as.data.table(merged_data_ent)
+
+# Group by 'raceid'
+grouped_data <- merged_data_ent[, .(prob_sum = sum(scaled), 
+                                    entropy = -sum(scaled * log2(scaled))),
+                                by = raceid]
+```
+
+### Conversion of track condition factors into (GOOD, SOFT, HEAVY)
+```{r}
+
+#
+
+merged_data_mdata<- merged_data_mdata %>%
+  mutate(track_condition_new = case_when(
+    grepl("SOFT", track_condition) ~ "SOFT",
+    grepl("HEAVY", track_condition) ~ "HEAVY",
+    grepl("GOOD", track_condition) ~ "GOOD",
+    grepl("SYNTHETIC", track_condition) ~ "SYNTHETIC",
+    grepl("DEAD", track_condition) ~ "DEAD",
+    grepl("AWT", track_condition) ~ "AWT",
+    TRUE ~ as.character(track_condition)
+  )) %>%
+  mutate(track_condition_new = factor(track_condition_new, levels = c("SOFT", "HEAVY", "GOOD","SYNTHETIC", "DEAD", "AWT")))
+
+
+
+
+```
+
+```{r}
+unique_values <- unique(merged_data_mdata$track_condition_new)
+
+# Print the unique values
+print(unique_values)
+
+```
+```{r}
+value_counts <- table(merged_data_mdata$track_condition_new)
+
+# Print unique value and corresponding number of rows
+print(value_counts)
+```
+Focus on comparing SOFT, HEAVY and GOOD considering they have sufficient sample sizes. 
+
+
+```{r}
+
+data_ent <- left_join(merged_data_mdata, grouped_data, by = 'raceid')
+```
+
+```{r}
+data_ent<- na.omit(data_ent)
+```
+
+```{r}
+# Subset data for only top 75th percentile of entropy values
+
+# 
+
+# Calculate the 75th percentile of the variable
+percentile_75 <- quantile(data_ent$entropy, 0.75)
+
+# Calculate the 60th percentile of the variable
+percentile_60 <- quantile(data_ent$entropy, 0.60)
+
+# Subset the data based on the 75th percentile and above
+high_ent_data <- data_ent %>%
+  filter(entropy >= percentile_75)
+
+
+
+```
+
+```{r}
+# low entropy data
+# Calculate the 75th percentile of the variable
+percentile_25 <- quantile(data_ent$entropy, 0.25)
+
+# Subset the data based on the 75th percentile and above
+low_ent_data <- data_ent %>%
+  filter(entropy < percentile_25)
+```
+
+
+### Exploration of high entropy data
+
+```{r}
+ggplot() +
+  geom_density(data = low_ent_data, aes(x = scaled, color = "Low entropy data"),alpha = 0.3) +
+  geom_density(data = high_ent_data, aes(x = scaled, color = "High entropy data"), alpha = 0.3) +
+  labs(color = "Dataset") +
+  theme_minimal()
+```
+
+```{r}
+ggplot() +
+  geom_density(data = low_ent_data, aes(x = WinRate, color = "Low entropy data"),alpha = 0.3) +
+  geom_density(data = high_ent_data, aes(x = WinRate, color = "High entropy data"), alpha = 0.3) +
+  labs(color = "Dataset") +
+  theme_minimal()
+```
+
+```{r}
+ggplot() +
+  geom_density(data = low_ent_data, aes(x = handicap, color = "Low entropy data"),alpha = 0.3) +
+  geom_density(data = high_ent_data, aes(x = handicap, color = "High entropy data"), alpha = 0.3) +
+  labs(color = "Dataset") +
+  theme_minimal()
+```
+
+```{r}
+ggplot() +
+  geom_density(data = high_ent_data, aes(x = scaled, color = track_condition_new),alpha = 0.3) +
+  labs(color = "Track condition") +
+  theme_minimal()
+```
+
+
+
+
+### Looking at track condition
+```{r}
+ggplot() +
+  geom_density(data = merged_data, aes(x = handicap, color = "Low entropy data"),alpha = 0.3) +
+  geom_density(data = high_ent_data, aes(x = handicap, color = "High entropy data"), alpha = 0.3) +
+  labs(color = "Dataset") +
+  theme_minimal()
+```
+
+#### Creating separate dataframes when track condition is GOOD, HEAVy and SOFT
+```{r}
+# Good track condition
+h_ent_g_track <- subset(high_ent_data, track_condition_new == "GOOD")
+
+# Soft track condition
+h_ent_s_track <- subset(high_ent_data, track_condition_new == "SOFT")
+
+# Soft track condition
+h_ent_h_track <- subset(high_ent_data, track_condition_new == "HEAVY")
+
+```
+
+```{r}
+# good track condition - high entropy model
+ high_ent_gtrack_model= glm(win ~ distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 + venuename + sex_restrictions  , family = binomial, data = h_ent_g_track)
+summary(high_ent_gtrack_model)
+```
+
+```{r}
+#Heavy track condition model
+high_ent_htrack_model= glm(win ~ distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 + venuename + sex_restrictions  , family = binomial, data = h_ent_h_track)
+summary(high_ent_htrack_model)
+```
+```{r}
+#Heavy track condition model
+high_ent_strack_model= glm(win ~ distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  venuename + sex_restrictions   , family = binomial, data = h_ent_s_track)
+summary(high_ent_strack_model)
+```
+
+
+
+### Hierarchical models
+#### High vs low handicap
+
+```{r}
+
+
+
+# Calculate the percentiles
+percentile_20 <- quantile(high_ent_data$handicap, 0.20)
+percentile_60 <- quantile(high_ent_data$handicap, 0.60)
+
+# Find raceids where at least one sample has a handicap above the 60th percentile
+selected_raceids <- high_ent_data %>%
+  group_by(raceid) %>%
+  filter(any(handicap > percentile_60)) %>%
+  pull(raceid)
+
+# Subset the data for the selected raceids
+selected_data <- high_ent_data %>%
+  filter(raceid %in% selected_raceids)
+
+# Create three levels of data based on handicap
+below_20th <- selected_data %>%
+  filter(handicap < percentile_20)
+
+between_20th_and_80th <- selected_data %>%
+  filter(handicap >= percentile_20 & handicap <= percentile_80)
+
+above_60th <- selected_data %>%
+  filter(handicap > percentile_60)
+
+
+```
+
+### High entropy model
+```{r}
+# low handiap model
+ high_ent_model= glm(win ~ distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 + venuename + sex_restrictions  , family = binomial, data = high_ent_data)
+summary(high_ent_model)
+```
+
+DSLR becomes very insignificant
+
+### Low handicap- high entropy model
+```{r}
+# low handicap model
+ low_h_high_ent_model= glm(win ~ distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 + venuename + sex_restrictions   , family = binomial, data = below_20th)
+summary(low_h_high_ent_model)
+```
+
+
+```{r}
+# medium handicap model
+ med_h_high_ent_model= glm(win ~ distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +venuename + sex_restrictions   , family = binomial, data = between_20th_and_80th)
+summary(med_h_high_ent_model)
+```
+
+```{r}
+# medium handicap model
+ high_h_high_ent_model= glm(win ~ distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 + venuename + sex_restrictions  , family = binomial, data = above_80th)
+summary(high_h_high_ent_model)
+```
+
+
+```{r}
+# focus on combinations of: high entropy, high or low handicap and the three track conditions (6 models)
+# create dataframes
+
+# all high entropy
+# high handicap
+# Good track condition
+g_track_high_hcap <- subset(above_60th, track_condition_new == "GOOD")
+
+# Soft track condition, high handicap
+s_track_high_hcap <- subset(above_60th, track_condition_new == "SOFT")
+
+# Heavy track condition, high handicap
+h_track_high_hcap <- subset(above_60th, track_condition_new == "HEAVY")
+
+#######################################################################
+#low handicap
+# Good track condition
+g_track_low_hcap <- subset(below_20th, track_condition_new == "GOOD")
+
+# Soft track condition, high handicap
+s_track_low_hcap <- subset(below_20th, track_condition_new == "SOFT")
+
+# Heavy track condition, high handicap
+h_track_low_hcap <- subset(below_20th, track_condition_new == "HEAVY")
+
+#######################################################################
+# Split into train and test sets, 60% and 40%, respectively 
+
+# all high entropy
+# high handicap
+# Good track condition
+# Calculate the index to split the data
+split_index_1 <- floor(0.6 * nrow(g_track_high_hcap))
+
+# Split the data into train and test sets
+train_g_track_high_hcap <- g_track_high_hcap[1:split_index_1, ]
+test_g_track_high_hcap <- g_track_high_hcap[(split_index_1 + 1):nrow(g_track_high_hcap), ]
+
+# Soft track condition
+# Calculate the index to split the data
+split_index_2 <- floor(0.6 * nrow(s_track_high_hcap))
+
+# Split the data into train and test sets
+train_s_track_high_hcap <- s_track_high_hcap[1:split_index_2, ]
+test_s_track_high_hcap <- s_track_high_hcap[(split_index_2 + 1):nrow(s_track_high_hcap), ]
+
+# Heavy track condition
+# Calculate the index to split the data
+split_index_3 <- floor(0.6 * nrow(h_track_high_hcap))
+
+# Split the data into train and test sets
+train_h_track_high_hcap <- h_track_high_hcap[1:split_index_3, ]
+test_h_track_high_hcap <- h_track_high_hcap[(split_index_3 + 1):nrow(h_track_high_hcap), ]
+
+#######################################################################
+#low handicap
+# Good track condition
+# Calculate the index to split the data
+split_index_4 <- floor(0.6 * nrow(g_track_low_hcap))
+
+# Split the data into train and test sets
+train_g_track_low_hcap <- g_track_low_hcap[1:split_index_4, ]
+test_g_track_low_hcap <- g_track_low_hcap[(split_index_4 + 1):nrow(g_track_low_hcap), ]
+
+# Soft track condition
+# Calculate the index to split the data
+split_index_5 <- floor(0.6 * nrow(s_track_low_hcap))
+
+# Split the data into train and test sets
+train_s_track_low_hcap <- s_track_low_hcap[1:split_index_5, ]
+test_s_track_low_hcap <- s_track_low_hcap[(split_index_5 + 1):nrow(s_track_low_hcap), ]
+
+# Heavy track condition
+# Calculate the index to split the data
+split_index_6 <- floor(0.6 * nrow(h_track_low_hcap))
+
+# Split the data into train and test sets
+train_h_track_low_hcap <- h_track_low_hcap[1:split_index_6, ]
+test_h_track_low_hcap <- h_track_low_hcap[(split_index_6 + 1):nrow(h_track_low_hcap), ]
+
+```
+
+```{r}
+#High entropy, good track, high handicap model
+# previously significant variables
+# no odds
+g_track_high_hcap_model = glm(win ~ handicap +distance + runners +  NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions , family = binomial, data = train_g_track_high_hcap)
+summary(g_track_high_hcap_model) 
+```
+```{r}
+#High entropy, good track, high handicap model
+# previously significant variables
+# with tminus1 odds
+g_track_high_hcap_model_odds = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 + sex_restrictions + sb_tminus1 , family = binomial, data = train_g_track_high_hcap)
+summary(g_track_high_hcap_model_odds) 
+```
+```{r}
+#High entropy, Soft track, high handicap model
+# previously significant variables
+# no odds
+s_track_high_hcap_model = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 + sex_restrictions  , family = binomial, data = train_s_track_high_hcap)
+summary(s_track_high_hcap_model) 
+```
+```{r}
+#High entropy, Soft track, high handicap model
+# previously significant variables
+# sb_tminus1 odds
+s_track_high_hcap_model_odds = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions + sb_tminus1, family = binomial, data = train_s_track_high_hcap)
+summary(s_track_high_hcap_model_odds) 
+```
+```{r}
+#High entropy, Heavy track, high handicap model
+# previously significant variables
+# no odds
+h_track_high_hcap_model = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 + sex_restrictions  , family = binomial, data = train_h_track_high_hcap)
+summary(h_track_high_hcap_model) 
+```
+
+```{r}
+#High entropy, Heavy track, high handicap model
+# previously significant variables
+# sb_tminus1 odds
+h_track_high_hcap_model_odds = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions + sb_tminus1, family = binomial, data = train_h_track_high_hcap)
+summary(h_track_high_hcap_model_odds) 
+```
+
+```{r}
+#High entropy, Good track, low handicap model
+# previously significant variables
+# no odds
+g_track_low_hcap_model = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions  , family = binomial, data = train_g_track_low_hcap )
+summary(g_track_low_hcap_model) 
+```
+
+```{r}
+#High entropy, Good track, low handicap model
+# previously significant variables
+# sb_tminus1 odds
+g_track_low_hcap_model_odds = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions  +sb_tminus1 , family = binomial, data = train_g_track_low_hcap )
+summary(g_track_low_hcap_model_odds) 
+```
+```{r}
+#High entropy, Soft track, low handicap model
+# previously significant variables
+# no odds
+s_track_low_hcap_model = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 + sex_restrictions  , family = binomial, data = train_s_track_low_hcap )
+summary(s_track_low_hcap_model) 
+```
+
+```{r}
+#High entropy, Soft track, low handicap model
+# previously significant variables
+# no odds
+s_track_low_hcap_model_odds = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions +sb_tminus1 , family = binomial, data = train_s_track_low_hcap )
+summary(s_track_low_hcap_model_odds) 
+```
+
+```{r}
+#High entropy, Heavy track, low handicap model
+# previously significant variables
+# no odds
+h_track_low_hcap_model = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions  , family = binomial, data = train_h_track_low_hcap )
+summary(h_track_low_hcap_model) 
+```
+
+```{r}
+#High entropy, Soft track, low handicap model
+# previously significant variables
+# no odds
+h_track_low_hcap_model_odds = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 + sex_restrictions  + sb_tminus1, family = binomial, data = train_h_track_low_hcap )
+summary(h_track_low_hcap_model_odds) 
+```
+
+#### Evaluation function
+
+
+
+``` {r}
+#High entropy, good track, low handicap, odds
+accuracies <- calculate_accuracies(g_track_low_hcap_model_odds, test_g_track_low_hcap)
+print(accuracies)
+
+```
+```{r}
+#High entropy, good track, low handicap, no odds
+accuracies <- calculate_accuracies(g_track_low_hcap_model, test_g_track_low_hcap)
+print(accuracies)
+```
+
+
+
+
+```{r}
+#High entropy, soft track, low handicap, odds
+accuracies <- calculate_accuracies(s_track_low_hcap_model_odds, test_s_track_low_hcap)
+print(accuracies)
+```
+```{r}
+#High entropy, soft track, low handicap, no odds
+accuracies <- calculate_accuracies(s_track_low_hcap_model, test_s_track_low_hcap)
+print(accuracies)
+```
+
+
+```{r}
+#High entropy, Heavy track, low handicap, odds
+accuracies <- calculate_accuracies(h_track_low_hcap_model_odds, test_h_track_low_hcap)
+print(accuracies)
+```
+
+```{r}
+#High entropy, Heavy track, low handicap
+accuracies <- calculate_accuracies(h_track_low_hcap_model, test_h_track_low_hcap)
+print(accuracies)
+```
+
+
+
+```{r}
+#High entropy, good track, high handicap, odds
+accuracies <- calculate_accuracies(g_track_high_hcap_model_odds, test_g_track_high_hcap)
+print(accuracies)
+```
+```{r}
+#High entropy, good track, high handicap
+accuracies <- calculate_accuracies(g_track_high_hcap_model, test_g_track_high_hcap)
+print(accuracies)
+```
+
+
+
+
+```{r}
+#High entropy, soft track, high handicap, odds
+accuracies <- calculate_accuracies(s_track_high_hcap_model_odds, test_s_track_high_hcap)
+print(accuracies)
+```
+
+
+```{r}
+#High entropy, soft track, high handicap
+accuracies <- calculate_accuracies(s_track_high_hcap_model, test_s_track_high_hcap)
+print(accuracies)
+```
+
+
+```{r}
+#High entropy, heavy track, high handicap, odds
+accuracies <- calculate_accuracies(h_track_high_hcap_model_odds, test_h_track_high_hcap)
+print(accuracies)
+```
+
+
+```{r}
+#High entropy, heavy track, high handicap
+accuracies <- calculate_accuracies(h_track_high_hcap_model, test_h_track_high_hcap)
+print(accuracies)
+```
+
+### Looking at  race levels
+### Still high entropy races
+```{r}
+# Good track condition, metro
+h_ent_g_track_metro <- subset(h_ent_g_track, level == "M")
+
+# Good track condition, provincial
+h_ent_g_track_prov <- subset(h_ent_g_track, level == "P")
+
+# Heavy track condition, metro
+h_ent_s_track_metro <- subset(h_ent_s_track, level == "M")
+
+# Heavy track condition, provincial
+h_ent_s_track_prov <- subset(h_ent_s_track, level == "P")
+
+# Soft track condition, metro
+h_ent_h_track_metro <- subset(h_ent_h_track, level == "M")
+
+# Soft track condition, provincial
+h_ent_h_track_prov <- subset(h_ent_h_track, level == "P")
+
+
+#########################################################
+#Train and Test sets
+
+# Good track condition, metro
+split_index_01 <- floor(0.6 * nrow(h_ent_g_track_metro))
+
+# Split the data into train and test sets
+train_h_ent_g_track_metro <- h_ent_g_track_metro[1:split_index_01, ]
+test_h_ent_g_track_metro  <- h_ent_g_track_metro [(split_index_01 + 1):nrow(h_ent_g_track_metro ), ]
+
+# Good track condition, provincial
+split_index_02 <- floor(0.6 * nrow(h_ent_g_track_prov))
+
+# Split the data into train and test sets
+train_h_ent_g_track_prov <- h_ent_g_track_prov[1:split_index_02, ]
+test_h_ent_g_track_prov <- h_ent_g_track_prov[(split_index_02 + 1):nrow(h_ent_g_track_prov), ]
+
+# Heavy track condition, metro
+split_index_03 <- floor(0.6 * nrow(h_ent_s_track_metro))
+
+# Split the data into train and test sets
+train_h_ent_s_track_metro <- h_ent_s_track_metro[1:split_index_03, ]
+test_h_ent_s_track_metro <- h_ent_s_track_metro[(split_index_03 + 1):nrow(h_ent_s_track_metro), ]
+
+# Heavy track condition, provincial
+split_index_04 <- floor(0.6 * nrow(h_ent_s_track_prov))
+
+# Split the data into train and test sets
+train_h_ent_s_track_prov <- h_ent_s_track_prov[1:split_index_04, ]
+test_h_ent_s_track_prov <- h_ent_s_track_prov[(split_index_04 + 1):nrow(h_ent_s_track_prov), ]
+
+# Soft track condition, metro
+split_index_05 <- floor(0.6 * nrow(h_ent_h_track_metro))
+
+# Split the data into train and test sets
+train_h_ent_h_track_metro <- h_ent_h_track_metro[1:split_index_05, ]
+test_h_ent_h_track_metro <- h_ent_h_track_metro[(split_index_05 + 1):nrow(h_ent_h_track_metro), ]
+
+# Soft track condition, provincial
+split_index_06 <- floor(0.6 * nrow(h_ent_h_track_prov))
+
+# Split the data into train and test sets
+train_h_ent_h_track_prov <- h_ent_h_track_prov[1:split_index_06, ]
+test_h_ent_h_track_prov <- h_ent_h_track_prov[(split_index_06 + 1):nrow(h_ent_h_track_prov), ]
+
+```
+### Models
+
+```{r}
+#High entropy, Good track, Metro
+# previously significant variables
+# odds - sb_tminus1
+h_ent_g_track_metro_model_odds = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 + sex_restrictions  + sb_tminus1, family = binomial, data = train_h_ent_g_track_metro )
+summary(h_ent_g_track_metro_model_odds) 
+```
+
+```{r}
+#High entropy, Good track, metro
+# previously significant variables
+# no odds
+h_ent_g_track_metro_model = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 + sex_restrictions , family = binomial, data = train_h_ent_g_track_metro )
+summary(h_ent_g_track_metro_model) 
+```
+
+```{r}
+#High entropy, Good track, provincial
+# previously significant variables
+# sb_tminus1 odds
+h_ent_g_track_prov_model_odds = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions + sb_tminus1 , family = binomial, data = train_h_ent_g_track_prov )
+summary(h_ent_g_track_prov_model_odds) 
+```
+
+```{r}
+#High entropy, Good track, provincial
+# previously significant variables
+# no odds
+h_ent_g_track_prov_model = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions , family = binomial, data = train_h_ent_g_track_prov )
+summary(h_ent_g_track_prov_model) 
+```
+
+```{r}
+#High entropy, Soft track, metro
+# previously significant variables
+# sb_tminus1 odds
+h_ent_s_track_metro_model_odds = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions + sb_tminus1 , family = binomial, data = train_h_ent_s_track_metro )
+summary(h_ent_s_track_metro_model_odds) 
+```
+
+```{r}
+#High entropy, Soft track, metro
+# previously significant variables
+# no odds
+h_ent_s_track_metro_model = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions , family = binomial, data = train_h_ent_s_track_metro )
+summary(h_ent_s_track_metro_model) 
+```
+
+```{r}
+#High entropy, Soft track, provincial
+# previously significant variables
+# sb_tminus1 odds
+h_ent_s_track_prov_model_odds = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions + sb_tminus1 , family = binomial, data = train_h_ent_s_track_prov )
+summary(h_ent_s_track_prov_model_odds) 
+```
+
+```{r}
+#High entropy, Soft track, provincial
+# previously significant variables
+# no odds
+h_ent_s_track_prov_model = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions , family = binomial, data = train_h_ent_s_track_prov )
+summary(h_ent_s_track_prov_model) 
+```
+
+```{r}
+#High entropy, Heavy track, metro
+# previously significant variables
+# sb_tminus1 odds
+h_ent_h_track_metro_model_odds = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions + sb_tminus1 , family = binomial, data = train_h_ent_h_track_metro  )
+summary(h_ent_h_track_metro_model_odds) 
+```
+
+
+
+
+```{r}
+#High entropy, Heavy track, metro
+# previously significant variables
+# no odds
+h_ent_h_track_metro_model = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions , family = binomial, data = train_h_ent_h_track_metro  )
+summary(h_ent_h_track_metro_model) 
+```
+
+```{r}
+#High entropy, Heavy track, provincial
+# previously significant variables
+# sb_tminus1 odds
+h_ent_h_track_prov_model_odds = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions + sb_tminus1 , family = binomial, data = train_h_ent_h_track_prov  )
+summary(h_ent_h_track_prov_model_odds) 
+```
+
+```{r}
+#High entropy, Heavy track, provincial
+# previously significant variables
+# sb_tminus1 odds
+h_ent_h_track_prov_model = glm(win ~ handicap + distance + runners + NRUNS + DSLR + WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir  + PlaceRate + TrackWin + GradeWin + class_ach_l3 + barrier_margadj +  age_3 +  sex_restrictions , family = binomial, data = train_h_ent_h_track_prov  )
+summary(h_ent_h_track_prov_model) 
+```
+
+### Evaluation
+#### Accuracy
+
+```{r}
+#High entropy, good track, metro, odds
+accuracies <- calculate_accuracies(h_ent_g_track_metro_model_odds, test_h_ent_g_track_metro)
+print(accuracies)
+```
+
+
+```{r}
+#High entropy, good track, metro,no odds
+accuracies <- calculate_accuracies(h_ent_g_track_metro_model, test_h_ent_g_track_metro)
+print(accuracies)
+```
+
+
+```{r}
+#High entropy, good track, prov, odds
+accuracies <- calculate_accuracies(h_ent_g_track_prov_model_odds, test_h_ent_g_track_prov )
+print(accuracies)
+```
+
+```{r}
+#High entropy, good track, prov, no odds
+accuracies <- calculate_accuracies(h_ent_g_track_prov_model, test_h_ent_g_track_prov )
+print(accuracies)
+```
+
+```{r}
+#High entropy, soft track, metro, odds
+accuracies <- calculate_accuracies(h_ent_s_track_metro_model_odds, test_h_ent_s_track_metro )
+print(accuracies)
+```
+
+
+```{r}
+#High entropy, soft track, metro, no odds
+accuracies <- calculate_accuracies(h_ent_s_track_metro_model, test_h_ent_s_track_metro )
+print(accuracies)
+```
+
+```{r}
+#High entropy, soft track, prov, odds
+accuracies <- calculate_accuracies(h_ent_s_track_prov_model_odds, test_h_ent_s_track_prov )
+print(accuracies)
+```
+
+
+```{r}
+#High entropy, soft track, prov, no odds
+accuracies <- calculate_accuracies(h_ent_s_track_prov_model, test_h_ent_s_track_prov )
+print(accuracies)
+```
+
+```{r}
+#High entropy, heavy track, metro, odds
+accuracies <- calculate_accuracies(h_ent_h_track_metro_model_odds, test_h_ent_h_track_metro )
+print(accuracies)
+```
+
+```{r}
+#High entropy, heavy track, metro, no odds
+accuracies <- calculate_accuracies(h_ent_h_track_metro_model, test_h_ent_h_track_metro )
+print(accuracies)
+```
+
+```{r}
+#High entropy, heavy track, prov, odds
+accuracies <- calculate_accuracies(h_ent_h_track_prov_model_odds, test_h_ent_h_track_prov )
+print(accuracies)
+```
+
+```{r}
+#High entropy, heavy track, prov, no odds
+accuracies <- calculate_accuracies(h_ent_h_track_prov_model, test_h_ent_h_track_prov )
+print(accuracies)
+```
+
+## Evaluating models that outperformed the market
+
+```{r}
+# models that outperformed market on test set in terms of precision
+# model 1
+summary(s_track_low_hcap_model_odds)
+
+
+```
+
+```{r}
+train_s_track_high_hcap<- subset(train_s_track_high_hcap, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid))
+
+
+```
+
+```{r}
+full_model1<- glm(win ~ .,family = binomial(), data = train_s_track_high_hcap)
+
+both_directions <- step(full_model1, data = train_s_track_high_hcap, direction="both",                         trace = 0)
+#backwards = step(full_model1)
+```
+
+
+```{r}
+summary(both_directions)
+```
+
+
+```{r}
+model1_best <- both_directions
+```
+
+
+
+```{r}
+accuracies <- calculate_accuracies(s_track_high_hcap_model_odds, test_s_track_high_hcap)
+print(accuracies)
+```
+
+```{r}
+accuracies <- calculate_accuracies(model1_best, test_s_track_high_hcap)
+print(accuracies)
+```
+Decreased precision
+
+### Model 2
+```{r}
+## model2
+# removes Na's
+train_h_track_high_hcap<- subset(train_h_track_high_hcap, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid))
+
+
+```
+
+```{r}
+full_model2<- glm(win ~ .,family = binomial(), data = train_h_track_high_hcap )
+both_directions2 <- step(full_model2, data = train_h_track_high_hcap, direction="both",                         trace = 0)
+```
+
+```{r}
+summary(both_directions2)
+```
+
+
+```{r}
+
+accuracies <- calculate_accuracies(h_track_high_hcap_model_odds, test_h_track_high_hcap)
+print(accuracies)
+
+```
+
+
+```{r}
+
+accuracies <- calculate_accuracies(both_directions2, test_h_track_high_hcap)
+print(accuracies)
+
+```
+same precision after refinement.
+
+
+### Model 3
+
+```{r}
+# model 3
+train_h_ent_g_track_metro<- subset(train_h_ent_g_track_metro, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid,level))
+```
+
+```{r}
+
+full_model3<- glm(win ~ .,family = binomial(), data = train_h_ent_g_track_metro)
+both_directions3 <- step(full_model3, data = train_h_ent_g_track_metro, direction="both",                         trace = 0)
+```
+
+```{r}
+summary(both_directions3)
+```
+
+
+
+```{r}
+# original accuracies
+accuracies <- calculate_accuracies(h_ent_g_track_metro_model_odds, test_h_ent_g_track_metro)
+print(accuracies)
+
+```
+
+```{r}
+accuracies <- calculate_accuracies(both_directions3, test_h_ent_g_track_metro)
+print(accuracies)
+
+```
+Better than original
+
+### Model 4
+```{r}
+train_h_ent_h_track_metro<- subset(train_h_ent_h_track_metro, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid,level))
+
+## Stepwise backwards
+
+full_model4<- glm(win ~ .,family = binomial(), data = train_h_ent_h_track_metro)
+both_directions4 <- step(full_model4, data = train_h_ent_h_track_metro, direction="both",                         trace = 0)
+```
+
+
+```{r}
+summary(both_directions4)
+```
+
+```{r}
+# original accuracies
+accuracies <- calculate_accuracies(h_ent_h_track_metro_model, test_h_ent_h_track_metro)
+print(accuracies)
+
+```
+
+```{r}
+accuracies <- calculate_accuracies(both_directions4, test_h_ent_h_track_metro)
+print(accuracies)
+```
+### Evaluating highest accuracy version of model (odds vs no odds) that have more than 1000 observations in test set
+
+```{r}
+train_g_track_high_hcap<- subset(train_g_track_high_hcap, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid))
+
+
+```
+
+```{r}
+full_model5<- glm(win ~ .,family = binomial(), data = train_g_track_high_hcap)
+
+both_directions5 <- step(full_model5, data = train_g_track_high_hcap, direction="both",                         trace = 0)
+#backwards = step(full_model1)
+```
+
+
+```{r}
+summary(both_directions5)
+```
+```{r}
+# original accuracies
+accuracies <- calculate_accuracies(g_track_high_hcap_model_odds, test_g_track_high_hcap)
+print(accuracies)
+
+```
+```{r}
+# stepwise accuracies
+accuracies <- calculate_accuracies(both_directions5, test_g_track_high_hcap)
+print(accuracies)
+
+```
+improved accuracy
+
+```{r}
+#model6
+train_h_ent_g_track_prov<- subset(train_h_ent_g_track_prov, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid, level))
+
+
+```
+
+```{r}
+full_model6<- glm(win ~ .,family = binomial(), data = train_h_ent_g_track_prov)
+
+both_directions6 <- step(full_model6, data = train_h_ent_g_track_prov, direction="both",                         trace = 0)
+#backwards = step(full_model1)
+```
+
+```{r}
+summary(both_directions6)
+```
+
+
+```{r}
+# original accuracies
+accuracies <- calculate_accuracies(h_ent_g_track_prov_model_odds, test_h_ent_g_track_prov)
+print(accuracies)
+
+```
+```{r}
+# original accuracies
+accuracies <- calculate_accuracies(both_directions6, test_h_ent_g_track_prov)
+print(accuracies)
+
+```
+
+improved accuracy
+
+```{r}
+#model7
+train_h_ent_s_track_metro<- subset(train_h_ent_s_track_metro, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid, level))
+
+
+```
+
+```{r}
+full_model7<- glm(win ~ .,family = binomial(), data = train_h_ent_s_track_metro)
+
+both_directions7 <- step(full_model7, data = train_h_ent_s_track_metro, direction="both",                         trace = 0)
+#backwards = step(full_model1)
+```
+
+```{r}
+summary(both_directions7)
+```
+
+
+```{r}
+# original accuracies
+accuracies <- calculate_accuracies(h_ent_s_track_metro_model_odds, test_h_ent_s_track_metro)
+print(accuracies)
+
+```
+```{r}
+# 
+accuracies <- calculate_accuracies(both_directions7, test_h_ent_s_track_metro)
+print(accuracies)
+
+```
+much lower accuracy
+
+
+```{r}
+#model8
+train_h_ent_s_track_prov<- subset(train_h_ent_s_track_prov, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid, level))
+
+
+```
+
+```{r}
+full_model8<- glm(win ~ .,family = binomial(), data = train_h_ent_s_track_prov)
+
+both_directions8 <- step(full_model8, data = train_h_ent_s_track_prov, direction="both",                         trace = 0)
+#backwards = step(full_model1)
+```
+
+```{r}
+summary(both_directions8)
+```
+
+```{r}
+# original accuracies
+accuracies <- calculate_accuracies(h_ent_s_track_prov_model_odds, test_h_ent_s_track_prov)
+print(accuracies)
+
+```
+
+```{r}
+# 
+accuracies <- calculate_accuracies(both_directions8, test_h_ent_s_track_prov)
+print(accuracies)
+
+```
+improved accuracy
+
+
+## Implement betting strategy
+
+```{r}
+
+predictions <- predict(s_track_high_hcap_model_odds, newdata = test_s_track_high_hcap, type = "response")
+  
+# Add predicted probabilities to the test data
+test_s_track_high_hcap$probs <- predictions
+
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df1 <- test_s_track_high_hcap %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df1 with the original dataframe to get the corresponding rows
+result_df1 <- test_s_track_high_hcap %>%
+  inner_join(max_probs_df1, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df1 <- result_df1 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df1 <- result_df1[, c("sb_final","win", "pred_winner")]
+
+
+```
+
+
+```{r}
+# winnings for betting $1 on each race
+result_df1 <- result_df1 %>%
+  mutate(return = sb_final * win)
+
+model1_winnings<- sum(result_df1$return)
+print(model1_winnings)
+model1_profit<- model1_winnings-nrow(result_df1)
+print(model1_profit)
+model_return_per_bet<- model1_profit/nrow(result_df1)
+print(model_return_per_bet)
+```
+
+### Model 2
+
+```{r}
+# model 2
+predictions2 <- predict(both_directions2, newdata = test_h_track_high_hcap, type = "response")
+  
+# Add predicted probabilities to the test data
+test_h_track_high_hcap$probs <- predictions2
+
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df2 <- test_h_track_high_hcap %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df2 with the original dataframe to get the corresponding rows
+result_df2 <- test_h_track_high_hcap %>%
+  inner_join(max_probs_df2, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df2 <- result_df2 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df2 <- result_df2[, c("sb_final","win", "pred_winner")]
+
+
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df2 <- result_df2 %>%
+  mutate(return = sb_final * win)
+
+model2_winnings<- sum(result_df2$return)
+print(model2_winnings)
+model2_profit<- model2_winnings-nrow(result_df2)
+print(model2_profit)
+model2_return_per_bet<- model2_profit/nrow(result_df2)
+print(model2_return_per_bet)
+```
+### Model 3
+```{r}
+# model 3
+predictions3 <- predict(both_directions3, newdata = test_h_ent_g_track_metro, type = "response")
+  
+# Add predicted probabilities to the test data
+test_h_ent_g_track_metro$probs <- predictions3
+
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df3 <- test_h_ent_g_track_metro %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df3 with the original dataframe to get the corresponding rows
+result_df3 <- test_h_ent_g_track_metro %>%
+  inner_join(max_probs_df3, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df3 <- result_df3 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df3 <- result_df3[, c("sb_final","win", "pred_winner")]
+
+
+```
+
+
+```{r}
+# winnings for betting $1 on each race
+result_df3 <- result_df3 %>%
+  mutate(return = sb_final * win)
+
+model3_winnings<- sum(result_df3$return)
+print(model3_winnings)
+model3_profit<- model3_winnings-nrow(result_df3)
+print(model3_profit)
+model3_return_per_bet<- model3_profit/nrow(result_df3)
+print(model3_return_per_bet)
+```
+### Model 4
+```{r}
+
+# model 4
+predictions4 <- predict(h_ent_h_track_metro_model, newdata = test_h_ent_h_track_metro, type = "response")
+  
+# Add predicted probabilities to the test data
+test_h_ent_h_track_metro$probs <- predictions4
+
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df4 <- test_h_ent_h_track_metro %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df4 with the original dataframe to get the corresponding rows
+result_df4 <- test_h_ent_h_track_metro %>%
+  inner_join(max_probs_df4, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df4 <- result_df4 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df4 <- result_df4[, c("sb_final","win", "pred_winner")]
+
+
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df4 <- result_df4 %>%
+  mutate(return = sb_final * win)
+
+model4_winnings<- sum(result_df4$return)
+print(model4_winnings)
+model4_profit<- model4_winnings-nrow(result_df4)
+print(model4_profit)
+model4_return_per_bet<- model4_profit/nrow(result_df4)
+print(model4_return_per_bet)
+```
+### Model 5
+```{r}
+
+# model 5
+predictions5 <- predict(both_directions5, newdata = test_g_track_high_hcap, type = "response")
+  
+# Add predicted probabilities to the test data
+test_g_track_high_hcap$probs <- predictions5
+
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df5 <- test_g_track_high_hcap %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df5 with the original dataframe to get the corresponding rows
+result_df5 <- test_g_track_high_hcap %>%
+  inner_join(max_probs_df5, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df5 <- result_df5 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df5 <- result_df5[, c("sb_final","win", "pred_winner")]
+
+
+```
+
+
+```{r}
+# winnings for betting $1 on each race
+result_df5 <- result_df5 %>%
+  mutate(return = sb_final * win)
+
+model5_winnings<- sum(result_df5$return)
+print(model5_winnings)
+model5_profit<- model5_winnings-nrow(result_df5)
+print(model5_profit)
+model5_return_per_bet<- model5_profit/nrow(result_df5)
+print(model5_return_per_bet)
+```
+### Model 6
+
+```{r}
+
+# model 6
+predictions6 <- predict(both_directions6, newdata = test_h_ent_g_track_prov, type = "response")
+  
+# Add predicted probabilities to the test data
+test_h_ent_g_track_prov$probs <- predictions6
+
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df6 <- test_h_ent_g_track_prov %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df6 with the original dataframe to get the corresponding rows
+result_df6 <- test_h_ent_g_track_prov %>%
+  inner_join(max_probs_df6, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df6 <- result_df6 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df6 <- result_df6[, c("sb_final","win", "pred_winner")]
+
+
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df6 <- result_df6 %>%
+  mutate(return = sb_final * win)
+
+model6_winnings<- sum(result_df6$return)
+print(model6_winnings)
+model6_profit<- model6_winnings-nrow(result_df6)
+print(model6_profit)
+model6_return_per_bet<- model6_profit/nrow(result_df6)
+print(model6_return_per_bet)
+```
+
+### Model 7
+```{r}
+
+# model 7
+predictions7 <- predict(h_ent_s_track_metro_model, newdata = test_h_ent_s_track_metro, type = "response")
+  
+# Add predicted probabilities to the test data
+test_h_ent_s_track_metro$probs <- predictions7
+
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df7 <- test_h_ent_s_track_metro %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df7 with the original dataframe to get the corresponding rows
+result_df7 <- test_h_ent_s_track_metro %>%
+  inner_join(max_probs_df7, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df7 <- result_df7 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df7 <- result_df7[, c("sb_final","win", "pred_winner")]
+
+
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df7 <- result_df7 %>%
+  mutate(return = sb_final * win)
+
+model7_winnings<- sum(result_df7$return)
+print(model7_winnings)
+model7_profit<- model7_winnings-nrow(result_df7)
+print(model7_profit)
+model7_return_per_bet<- model7_profit/nrow(result_df7)
+print(model7_return_per_bet)
+```
+### Model 8
+```{r}
+# model 8
+predictions8 <- predict(both_directions8, newdata = test_h_ent_s_track_prov, type = "response")
+  
+# Add predicted probabilities to the test data
+test_h_ent_s_track_prov$probs <- predictions8
+
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df8 <- test_h_ent_s_track_prov %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df7 with the original dataframe to get the corresponding rows
+result_df8 <- test_h_ent_s_track_prov %>%
+  inner_join(max_probs_df8, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df8 <- result_df8 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df8 <- result_df8[, c("sb_final","win", "pred_winner")]
+
+
+
+
+
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df8 <- result_df8 %>%
+  mutate(return = sb_final * win)
+
+model8_winnings<- sum(result_df8$return)
+print(model8_winnings)
+model8_profit<- model8_winnings-nrow(result_df8)
+print(model8_profit)
+model8_return_per_bet<- model8_profit/nrow(result_df8)
+print(model8_return_per_bet)
+```
+
+
+Model one is best, though it is skewed by wining a $201 bet (41.7% return)
+Model three is the only other profitable model, more consistent performance, but very small return (5.89%)
+
+
+
+
+## try up sampling ( on large datasets)
+### re-generate the datasets
+```{r}
+# Good track condition, metro
+h_ent_g_track_metro <- subset(h_ent_g_track, level == "M")
+
+# Good track condition, provincial
+h_ent_g_track_prov <- subset(h_ent_g_track, level == "P")
+
+# Heavy track condition, metro
+h_ent_s_track_metro <- subset(h_ent_s_track, level == "M")
+
+# Heavy track condition, provincial
+h_ent_s_track_prov <- subset(h_ent_s_track, level == "P")
+
+# Soft track condition, metro
+h_ent_h_track_metro <- subset(h_ent_h_track, level == "M")
+
+# Soft track condition, provincial
+h_ent_h_track_prov <- subset(h_ent_h_track, level == "P")
+
+
+#########################################################
+#Train and Test sets
+
+# Good track condition, metro
+split_index_01 <- floor(0.6 * nrow(h_ent_g_track_metro))
+
+# Split the data into train and test sets
+train_h_ent_g_track_metro <- h_ent_g_track_metro[1:split_index_01, ]
+test_h_ent_g_track_metro  <- h_ent_g_track_metro [(split_index_01 + 1):nrow(h_ent_g_track_metro ), ]
+
+# Good track condition, provincial
+split_index_02 <- floor(0.6 * nrow(h_ent_g_track_prov))
+
+# Split the data into train and test sets
+train_h_ent_g_track_prov <- h_ent_g_track_prov[1:split_index_02, ]
+test_h_ent_g_track_prov <- h_ent_g_track_prov[(split_index_02 + 1):nrow(h_ent_g_track_prov), ]
+
+# Heavy track condition, metro
+split_index_03 <- floor(0.6 * nrow(h_ent_s_track_metro))
+
+# Split the data into train and test sets
+train_h_ent_s_track_metro <- h_ent_s_track_metro[1:split_index_03, ]
+test_h_ent_s_track_metro <- h_ent_s_track_metro[(split_index_03 + 1):nrow(h_ent_s_track_metro), ]
+
+# Heavy track condition, provincial
+split_index_04 <- floor(0.6 * nrow(h_ent_s_track_prov))
+
+# Split the data into train and test sets
+train_h_ent_s_track_prov <- h_ent_s_track_prov[1:split_index_04, ]
+test_h_ent_s_track_prov <- h_ent_s_track_prov[(split_index_04 + 1):nrow(h_ent_s_track_prov), ]
+
+# Soft track condition, metro
+split_index_05 <- floor(0.6 * nrow(h_ent_h_track_metro))
+
+# Split the data into train and test sets
+train_h_ent_h_track_metro <- h_ent_h_track_metro[1:split_index_05, ]
+test_h_ent_h_track_metro <- h_ent_h_track_metro[(split_index_05 + 1):nrow(h_ent_h_track_metro), ]
+
+# Soft track condition, provincial
+split_index_06 <- floor(0.6 * nrow(h_ent_h_track_prov))
+
+# Split the data into train and test sets
+train_h_ent_h_track_prov <- h_ent_h_track_prov[1:split_index_06, ]
+test_h_ent_h_track_prov <- h_ent_h_track_prov[(split_index_06 + 1):nrow(h_ent_h_track_prov), ]
+
+```
+
+```{r}
+# focus on combinations of: high entropy, high or low handicap and the three track conditions (6 models)
+# create dataframes
+
+# all high entropy
+# high handicap
+# Good track condition
+g_track_high_hcap <- subset(above_60th, track_condition_new == "GOOD")
+
+# Soft track condition, high handicap
+s_track_high_hcap <- subset(above_60th, track_condition_new == "SOFT")
+
+# Heavy track condition, high handicap
+h_track_high_hcap <- subset(above_60th, track_condition_new == "HEAVY")
+
+#######################################################################
+#low handicap
+# Good track condition
+g_track_low_hcap <- subset(below_20th, track_condition_new == "GOOD")
+
+# Soft track condition, high handicap
+s_track_low_hcap <- subset(below_20th, track_condition_new == "SOFT")
+
+# Heavy track condition, high handicap
+h_track_low_hcap <- subset(below_20th, track_condition_new == "HEAVY")
+
+#######################################################################
+# Split into train and test sets, 60% and 40%, respectively 
+
+# all high entropy
+# high handicap
+# Good track condition
+# Calculate the index to split the data
+split_index_1 <- floor(0.6 * nrow(g_track_high_hcap))
+
+# Split the data into train and test sets
+train_g_track_high_hcap <- g_track_high_hcap[1:split_index_1, ]
+test_g_track_high_hcap <- g_track_high_hcap[(split_index_1 + 1):nrow(g_track_high_hcap), ]
+
+# Soft track condition
+# Calculate the index to split the data
+split_index_2 <- floor(0.6 * nrow(s_track_high_hcap))
+
+# Split the data into train and test sets
+train_s_track_high_hcap <- s_track_high_hcap[1:split_index_2, ]
+test_s_track_high_hcap <- s_track_high_hcap[(split_index_2 + 1):nrow(s_track_high_hcap), ]
+
+# Heavy track condition
+# Calculate the index to split the data
+split_index_3 <- floor(0.6 * nrow(h_track_high_hcap))
+
+# Split the data into train and test sets
+train_h_track_high_hcap <- h_track_high_hcap[1:split_index_3, ]
+test_h_track_high_hcap <- h_track_high_hcap[(split_index_3 + 1):nrow(h_track_high_hcap), ]
+
+#######################################################################
+#low handicap
+# Good track condition
+# Calculate the index to split the data
+split_index_4 <- floor(0.6 * nrow(g_track_low_hcap))
+
+# Split the data into train and test sets
+train_g_track_low_hcap <- g_track_low_hcap[1:split_index_4, ]
+test_g_track_low_hcap <- g_track_low_hcap[(split_index_4 + 1):nrow(g_track_low_hcap), ]
+
+# Soft track condition
+# Calculate the index to split the data
+split_index_5 <- floor(0.6 * nrow(s_track_low_hcap))
+
+# Split the data into train and test sets
+train_s_track_low_hcap <- s_track_low_hcap[1:split_index_5, ]
+test_s_track_low_hcap <- s_track_low_hcap[(split_index_5 + 1):nrow(s_track_low_hcap), ]
+
+# Heavy track condition
+# Calculate the index to split the data
+split_index_6 <- floor(0.6 * nrow(h_track_low_hcap))
+
+# Split the data into train and test sets
+train_h_track_low_hcap <- h_track_low_hcap[1:split_index_6, ]
+test_h_track_low_hcap <- h_track_low_hcap[(split_index_6 + 1):nrow(h_track_low_hcap), ]
+
+```
+
+```{r}
+# focus on combinations of: high entropy, high or low handicap and the three track conditions (6 models)
+# create dataframes
+
+# all high entropy
+# high handicap
+# Good track condition
+g_track_high_hcap <- subset(above_60th, track_condition_new == "GOOD")
+
+# Soft track condition, high handicap
+s_track_high_hcap <- subset(above_60th, track_condition_new == "SOFT")
+
+# Heavy track condition, high handicap
+h_track_high_hcap <- subset(above_60th, track_condition_new == "HEAVY")
+
+#######################################################################
+#low handicap
+# Good track condition
+g_track_low_hcap <- subset(below_20th, track_condition_new == "GOOD")
+
+# Soft track condition, high handicap
+s_track_low_hcap <- subset(below_20th, track_condition_new == "SOFT")
+
+# Heavy track condition, high handicap
+h_track_low_hcap <- subset(below_20th, track_condition_new == "HEAVY")
+
+#######################################################################
+# Split into train and test sets, 60% and 40%, respectively 
+
+# all high entropy
+# high handicap
+# Good track condition
+# Calculate the index to split the data
+split_index_1 <- floor(0.6 * nrow(g_track_high_hcap))
+
+# Split the data into train and test sets
+train_g_track_high_hcap <- g_track_high_hcap[1:split_index_1, ]
+test_g_track_high_hcap <- g_track_high_hcap[(split_index_1 + 1):nrow(g_track_high_hcap), ]
+
+# Soft track condition
+# Calculate the index to split the data
+split_index_2 <- floor(0.6 * nrow(s_track_high_hcap))
+
+# Split the data into train and test sets
+train_s_track_high_hcap <- s_track_high_hcap[1:split_index_2, ]
+test_s_track_high_hcap <- s_track_high_hcap[(split_index_2 + 1):nrow(s_track_high_hcap), ]
+
+# Heavy track condition
+# Calculate the index to split the data
+split_index_3 <- floor(0.6 * nrow(h_track_high_hcap))
+
+# Split the data into train and test sets
+train_h_track_high_hcap <- h_track_high_hcap[1:split_index_3, ]
+test_h_track_high_hcap <- h_track_high_hcap[(split_index_3 + 1):nrow(h_track_high_hcap), ]
+
+#######################################################################
+#low handicap
+# Good track condition
+# Calculate the index to split the data
+split_index_4 <- floor(0.6 * nrow(g_track_low_hcap))
+
+# Split the data into train and test sets
+train_g_track_low_hcap <- g_track_low_hcap[1:split_index_4, ]
+test_g_track_low_hcap <- g_track_low_hcap[(split_index_4 + 1):nrow(g_track_low_hcap), ]
+
+# Soft track condition
+# Calculate the index to split the data
+split_index_5 <- floor(0.6 * nrow(s_track_low_hcap))
+
+# Split the data into train and test sets
+train_s_track_low_hcap <- s_track_low_hcap[1:split_index_5, ]
+test_s_track_low_hcap <- s_track_low_hcap[(split_index_5 + 1):nrow(s_track_low_hcap), ]
+
+# Heavy track condition
+# Calculate the index to split the data
+split_index_6 <- floor(0.6 * nrow(h_track_low_hcap))
+
+# Split the data into train and test sets
+train_h_track_low_hcap <- h_track_low_hcap[1:split_index_6, ]
+test_h_track_low_hcap <- h_track_low_hcap[(split_index_6 + 1):nrow(h_track_low_hcap), ]
+
+```
+
+
+## Up sample function
+```{r}
+library(dplyr)
+
+upsample_winners_losers <- function(input_df) {
+  # Create a dataframe of winners
+  winners_df <- input_df %>% filter(win == 1)
+  
+  # Create a dataframe of losers
+  losers_df <- input_df %>% filter(win == 0)
+  
+  # Sample one loser for each raceid
+  sampled_losers_df <- losers_df %>%
+    group_by(raceid) %>%
+    sample_n(1) %>%
+    ungroup()
+  
+  # Combine the winners and sampled losers
+  upsampled_df <- bind_rows(winners_df, sampled_losers_df)
+  
+  # Shuffle the upsampled dataframe if needed
+  upsampled_df <- upsampled_df %>%
+    arrange(raceid)
+  
+  return(upsampled_df)
+}
+```
+
+### First up-sample
+```{r}
+train_g_track_high_hcap_up<- upsample_winners_losers(train_g_track_high_hcap)
+
+```
+
+
+```{r}
+#model7
+train_g_track_high_hcap_up<- subset(train_g_track_high_hcap_up, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid, level))
+
+
+```
+
+```{r}
+full_model9<- glm(win ~ .,family = binomial(), data = train_g_track_high_hcap_up)
+
+both_directions9 <- step(full_model9, data = train_g_track_high_hcap_up, direction="both",                         trace = 0)
+#backwards = step(full_model1)
+```
+
+```{r}
+summary(both_directions9)
+```
+
+
+```{r}
+# original accuracies - before up sampling
+accuracies <- calculate_accuracies(both_directions5, test_g_track_high_hcap)
+print(accuracies)
+
+```
+
+```{r}
+# original accuracies - before up sampling
+accuracies <- calculate_accuracies(both_directions9, test_g_track_high_hcap)
+print(accuracies)
+
+```
+better accuracy
+
+### Implement the betting strategy
+
+```{r}
+
+
+test_9<- glm(formula = win ~ distance + runners + NRUNS + WinRate + Jockey_Rating_D + 
+    TrackWin, family = binomial(), 
+    data = train_g_track_high_hcap_up) 
+summary(test_9)
+```
+
+
+```{r}
+# model 8
+predictions9 <- predict(both_directions9, newdata = test_g_track_high_hcap, type = "response")
+
+# Add predicted probabilities to the test data
+test_g_track_high_hcap$probs <- predictions9
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df9 <- test_g_track_high_hcap %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df9 with the original dataframe to get the corresponding rows
+result_df9 <- test_g_track_high_hcap %>%
+  inner_join(max_probs_df9, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df9 <- result_df9 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df9 <- result_df9[, c("sb_final", "win", "pred_winner")]
+
+
+
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df9 <- result_df9 %>%
+  mutate(return = sb_final * win)
+
+model9_winnings<- sum(result_df9$return)
+print(model9_winnings)
+model9_profit<- model9_winnings-nrow(result_df9)
+print(model9_profit)
+model9_return_per_bet<- model9_profit/nrow(result_df9)
+print(model9_return_per_bet)
+```
+## second upsample model
+```{r}
+train_s_track_high_hcap_up<- upsample_winners_losers(train_s_track_high_hcap)
+
+```
+
+
+```{r}
+#model10
+train_s_track_high_hcap_up<- subset(train_s_track_high_hcap_up, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid, level))
+
+
+```
+
+```{r}
+full_model10<- glm(win ~ .,family = binomial(), data = train_s_track_high_hcap_up)
+
+both_directions10 <- step(full_model10, data = train_g_track_high_hcap_up, direction="both",                         trace = 0)
+#backwards = step(full_model1)
+```
+
+```{r}
+summary(both_directions10)
+```
+
+
+```{r}
+summary(s_track_high_hcap_model_odds)
+```
+
+```{r}
+model_10b<- glm(formula = win ~ handicap + distance + runners + NRUNS + DSLR + 
+    WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir + PlaceRate + 
+    TrackWin + GradeWin + class_ach_l3 + barrier_margadj + age_3 + 
+    sex_restrictions + sb_tminus1, family = binomial, data = train_s_track_high_hcap_up)
+
+```
+
+
+
+```{r}
+# original accuracies - before up sampling
+accuracies <- calculate_accuracies(both_directions, test_s_track_high_hcap)
+print(accuracies)
+
+```
+```{r}
+# original accuracies - before up sampling (full(better) model)
+accuracies <- calculate_accuracies(s_track_high_hcap_model_odds, test_s_track_high_hcap)
+print(accuracies)
+
+```
+
+```{r}
+# original accuracies - before up sampling
+accuracies <- calculate_accuracies(both_directions10, test_s_track_high_hcap)
+print(accuracies)
+
+```
+```{r}
+# original accuracies - before up sampling
+accuracies <- calculate_accuracies(model_10b, test_s_track_high_hcap)
+print(accuracies)
+
+```
+Up-sampled AIC model the best of up-sampled models. Full model with no-upsampling better in terms of precision.
+
+```{r}
+# model 10
+predictions10 <- predict(both_directions10, newdata = test_s_track_high_hcap, type = "response")
+
+# Add predicted probabilities to the test data
+test_s_track_high_hcap$probs <- predictions10
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df10 <- test_s_track_high_hcap %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df9 with the original dataframe to get the corresponding rows
+result_df10 <- test_s_track_high_hcap %>%
+  inner_join(max_probs_df10, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df10 <- result_df10 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df10 <- result_df10[, c("sb_final", "win", "pred_winner")]
+
+
+
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df10 <- result_df10 %>%
+  mutate(return = sb_final * win)
+
+model10_winnings<- sum(result_df10$return)
+print(model10_winnings)
+model10_profit<- model10_winnings-nrow(result_df10)
+print(model10_profit)
+model10_return_per_bet<- model10_profit/nrow(result_df10)
+print(model10_return_per_bet)
+```
+### Third up sample
+
+```{r}
+train_h_ent_g_track_metro_up<- upsample_winners_losers(train_h_ent_g_track_metro)
+
+```
+
+
+```{r}
+#model11
+train_h_ent_g_track_metro_up<- subset(train_h_ent_g_track_metro_up, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid, level))
+
+
+```
+
+```{r}
+full_model11<- glm(win ~ .,family = binomial(), data = train_h_ent_g_track_metro_up)
+
+both_directions11 <- step(full_model11, data = train_h_ent_g_track_metro_up, direction="both",                         trace = 0)
+#backwards = step(full_model1)
+```
+
+```{r}
+summary(both_directions11)
+```
+```{r}
+# original accuracies - before up sampling
+accuracies <- calculate_accuracies(both_directions3, test_h_ent_g_track_metro)
+print(accuracies)
+
+```
+```{r}
+# original accuracies - after up sampling
+accuracies <- calculate_accuracies(both_directions11, test_h_ent_g_track_metro)
+print(accuracies)
+
+```
+```{r}
+# model 10
+predictions11 <- predict(both_directions11, newdata = test_h_ent_g_track_metro, type = "response")
+
+# Add predicted probabilities to the test data
+test_h_ent_g_track_metro$probs <- predictions11
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df11 <- test_h_ent_g_track_metro %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df9 with the original dataframe to get the corresponding rows
+result_df11 <- test_h_ent_g_track_metro %>%
+  inner_join(max_probs_df11, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df11 <- result_df11 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df11 <- result_df11[, c("sb_final", "win", "pred_winner")]
+
+
+
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df11 <- result_df11 %>%
+  mutate(return = sb_final * win)
+
+model11_winnings<- sum(result_df11$return)
+print(model11_winnings)
+model11_profit<- model11_winnings-nrow(result_df11)
+print(model11_profit)
+model11_return_per_bet<- model11_profit/nrow(result_df11)
+print(model11_return_per_bet)
+```
+Best model so far
+
+### Fourth up-sample model
+```{r}
+train_h_ent_g_track_prov_up<- upsample_winners_losers(train_h_ent_g_track_prov)
+
+```
+
+
+```{r}
+#model12
+train_h_ent_g_track_prov_up<- subset(train_h_ent_g_track_prov_up, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid, level))
+
+
+```
+
+```{r}
+full_model12<- glm(win ~ .,family = binomial(), data = train_h_ent_g_track_prov_up)
+
+both_directions12 <- step(full_model12, data = train_h_ent_g_track_prov_up, direction="both",                         trace = 0)
+#backwards = step(full_model1)
+```
+
+```{r}
+summary(both_directions12)
+```
+```{r}
+# original accuracies - before up sampling
+accuracies <- calculate_accuracies(both_directions6, test_h_ent_g_track_prov)
+print(accuracies)
+
+```
+
+```{r}
+# original accuracies - after up sampling
+accuracies <- calculate_accuracies(both_directions12, test_h_ent_g_track_prov)
+print(accuracies)
+
+```
+```{r}
+# model 10
+predictions12 <- predict(both_directions12, newdata = test_h_ent_g_track_prov, type = "response")
+
+# Add predicted probabilities to the test data
+test_h_ent_g_track_prov$probs <- predictions12
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df12 <- test_h_ent_g_track_prov %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df9 with the original dataframe to get the corresponding rows
+result_df12 <- test_h_ent_g_track_prov %>%
+  inner_join(max_probs_df12, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df12 <- result_df12 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df12 <- result_df12[, c("sb_final", "win", "pred_winner")]
+
+
+
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df12 <- result_df12 %>%
+  mutate(return = sb_final * win)
+
+model12_winnings<- sum(result_df12$return)
+print(model12_winnings)
+model12_profit<- model12_winnings-nrow(result_df12)
+print(model12_profit)
+model12_return_per_bet<- model12_profit/nrow(result_df12)
+print(model12_return_per_bet)
+```
+### Fifth up-sample
+
+```{r}
+train_h_ent_s_track_metro_up<- upsample_winners_losers(train_h_ent_s_track_metro)
+
+```
+
+
+```{r}
+#model11
+train_h_ent_s_track_metro_up<- subset(train_h_ent_s_track_metro_up, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid, level))
+
+
+```
+
+```{r}
+full_model13<- glm(win ~ .,family = binomial(), data = train_h_ent_s_track_metro_up)
+
+both_directions13 <- step(full_model13, data = train_h_ent_s_track_metro_up, direction="both",                         trace = 0)
+#backwards = step(full_model1)
+```
+
+```{r}
+summary(both_directions13)
+```
+```{r}
+summary(h_ent_s_track_metro_model_odds)
+
+```
+
+```{r}
+model13_b <- glm(formula = win ~ handicap + distance + runners + NRUNS + DSLR + 
+    WinRate + Jockey_Rating + Jockey_Rating_D + ExpPir + PlaceRate + 
+    TrackWin + GradeWin + class_ach_l3 + barrier_margadj + age_3 + 
+    sex_restrictions + sb_tminus1, family = binomial, data = train_h_ent_s_track_metro_up)
+```
+
+```{r}
+# original accuracies - before up sampling
+accuracies <- calculate_accuracies(both_directions7, test_h_ent_s_track_metro)
+print(accuracies)
+
+```
+
+```{r}
+# original accuracies - before up sampling (full(better) model)
+accuracies <- calculate_accuracies(h_ent_s_track_metro_model_odds, test_h_ent_s_track_metro)
+print(accuracies)
+
+```
+
+```{r}
+# accuracies - after up sampling AIC model)
+accuracies <- calculate_accuracies(both_directions13, test_h_ent_s_track_metro)
+print(accuracies)
+
+```
+
+```{r}
+# accuracies - after up sampling (full(better) model)
+accuracies <- calculate_accuracies(model13_b, test_h_ent_s_track_metro)
+print(accuracies)
+
+```
+ after up sampling AIC model is best, test this on betting strategy
+ 
+```{r}
+# model 10
+predictions13 <- predict(both_directions13, newdata = test_h_ent_s_track_metro, type = "response")
+
+# Add predicted probabilities to the test data
+test_h_ent_s_track_metro$probs <- predictions13
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df13 <- test_h_ent_s_track_metro %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df9 with the original dataframe to get the corresponding rows
+result_df13 <- test_h_ent_s_track_metro %>%
+  inner_join(max_probs_df13, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df13 <- result_df13 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df13 <- result_df13[, c("sb_final", "win", "pred_winner")]
+
+
+
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df13 <- result_df13 %>%
+  mutate(return = sb_final * win)
+
+model13_winnings<- sum(result_df13$return)
+print(model13_winnings)
+model13_profit<- model13_winnings-nrow(result_df13)
+print(model13_profit)
+model13_return_per_bet<- model13_profit/nrow(result_df13)
+print(model13_return_per_bet)
+``` 
+### Sixth up-sample
+h_ent_s_track_prov_model_odds
+```{r}
+train_h_ent_s_track_prov_up<- upsample_winners_losers(train_h_ent_s_track_prov)
+
+```
+
+
+```{r}
+#model14
+train_h_ent_s_track_prov_up<- subset(train_h_ent_s_track_prov_up, select = -c(entropy, prob_sum, track_condition_new, track_condition, sb_final.1, raceid, level))
+
+
+```
+
+```{r}
+full_model14<- glm(win ~ .,family = binomial(), data = train_h_ent_s_track_prov_up)
+
+both_directions14 <- step(full_model14, data = train_h_ent_s_track_prov_up, direction="both",                         trace = 0)
+#backwards = step(full_model1)
+```
+
+```{r}
+summary(both_directions14)
+```
+
+
+```{r}
+# accuracies - after up sampling (full(better) model)
+accuracies <- calculate_accuracies(both_directions8, test_h_ent_s_track_prov)
+print(accuracies)
+
+```
+
+```{r}
+# accuracies - after up sampling (full(better) model)
+accuracies <- calculate_accuracies(both_directions14, test_h_ent_s_track_prov)
+print(accuracies)
+
+```
+accuracy reduced after up-sampling
+
+```{r}
+# model 10
+predictions14 <- predict(both_directions14, newdata = test_h_ent_s_track_prov, type = "response")
+
+# Add predicted probabilities to the test data
+test_h_ent_s_track_prov$probs <- predictions14
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df14 <- test_h_ent_s_track_prov %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df9 with the original dataframe to get the corresponding rows
+result_df14 <- test_h_ent_s_track_prov %>%
+  inner_join(max_probs_df14, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df14 <- result_df14 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df14 <- result_df14[, c("sb_final", "win", "pred_winner")]
+
+
+
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df14 <- result_df14 %>%
+  mutate(return = sb_final * win)
+
+model14_winnings<- sum(result_df14$return)
+print(model14_winnings)
+model14_profit<- model14_winnings-nrow(result_df14)
+print(model14_profit)
+model14_return_per_bet<- model14_profit/nrow(result_df14)
+print(model14_return_per_bet)
+``` 
+
+
+## BEST MODEL
+```{r}
+best_model<- both_directions11
+summary(best_model)
+```
+## Checking model validity and assumptions of best model
+
+### Training data evaluation
+```{r}
+probs_train <- predict(best_model, type = "response", newdata =train_h_ent_g_track_metro )
+```
+
+```{r}
+library(pROC)
+best_roc <- roc(train_h_ent_g_track_metro$win ~ probs_train)
+best_roc$auc
+
+#calculate the Gini score
+gini_best <- 2*(best_roc$auc - 0.5)
+gini_best
+```
+### Linearity
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+
+best_model_data <- subset(train_h_ent_g_track_metro, select= c(win , Jockey_Rating_D , scaled , sb_prembl , sb_postmbl, sb_tminus2))
+
+best_model_data$win <- as.numeric(best_model_data$win)
+
+predictors <- colnames(best_model_data)
+
+
+# Bind the logit and tidying the data for plot
+best_model_data <- best_model_data %>%
+  mutate(logit = log(probs_train/(1-probs_train))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+# Plotting
+ggplot(best_model_data, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+### Influential observations
+
+```{r}
+plot(best_model, which = 4, id.n = 3)
+```
+```{r}
+library(broom)
+best_model.data <- augment(best_model) %>% 
+  mutate(index = 1:n()) 
+
+```
+
+```{r}
+best_model.data %>% top_n(3, .cooksd)
+```
+### Residuals plot -are the Observations are Independent
+```{r}
+ggplot(best_model.data, aes(index, .std.resid)) + 
+  geom_point(aes(color = win), alpha = .5) +
+  theme_bw()+
+  xlab(" Observation") +
+  ylab( "Standardised residuals") +
+  ggtitle("Residuals (test for independence)")
+
+```
+
+```{r}
+# Looking for observations greater than three standard deviations from the mean
+best_model.data %>% 
+  filter(abs(.std.resid) > 3)
+```
+No results, no serious outliers present
+
+### Multi-colinearity
+
+```{r}
+# multi-colinearity present with sb_prembl and sb_postmbl
+car::vif(best_model)
+```
+### ANOVA
+
+```{r}
+anova(best_model, test="Chisq")
+```
+
+sb_postmbl doesn't have a significant drop in deviance, maybe remove this variable? May also remove issues with multi-colinearity
+
+
+```{r}
+library(DHARMa)
+#simulated residual plots
+res=simulateResiduals(best_model)
+plot(res)
+
+```
+KS test
+H0: “the empirical distribution of the data fits the theoretical distribution” and H1: "The empirical distribution does not fit the theoretical distribution"
+
+
+Outlier test
+No problems with outliers
+
+```{r model with confints, include=TRUE}
+#log odds
+(est <- cbind(Estimate = coef(best_model), confint(best_model)))
+
+```
+
+```{r odds ratio,include=TRUE}
+#odds ratio
+(est_exp <- cbind(exp(est)))
+```
+
+### Best model adjusted
+```{r}
+best_adjusted <- glm(formula = win ~ Jockey_Rating_D + scaled + sb_postmbl +  
+    sb_tminus2, family = binomial(), data = train_h_ent_g_track_metro_up)
+summary(best_adjusted)
+```
+```{r}
+# accuracies - after up sampling (full(better) model)
+accuracies <- calculate_accuracies(best_adjusted, test_h_ent_g_track_metro)
+print(accuracies)
+
+```
+```{r}
+# model 10
+predictions15 <- predict(best_adjusted, newdata = test_h_ent_g_track_metro, type = "response")
+
+# Add predicted probabilities to the test data
+test_h_ent_g_track_metro$probs <- predictions15
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df15 <- test_h_ent_g_track_metro %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df9 with the original dataframe to get the corresponding rows
+result_df15 <- test_h_ent_g_track_metro %>%
+  inner_join(max_probs_df15, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df15 <- result_df15 %>%
+  filter(probs == pred_winner)
+
+# Select specific columns
+result_df15 <- result_df15[, c("sb_final", "win", "pred_winner")]
+
+
+
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df15 <- result_df15 %>%
+  mutate(return = sb_final * win)
+
+model15_winnings<- sum(result_df15$return)
+print(model15_winnings)
+model15_profit<- model15_winnings-nrow(result_df15)
+print(model15_profit)
+model15_return_per_bet<- model15_profit/nrow(result_df15)
+print(model15_return_per_bet)
+``` 
+
+### Model performance and validity for adjusted model
+### Training data evaluation
+```{r}
+probs_train <- predict(best_adjusted, type = "response", newdata =train_h_ent_g_track_metro )
+```
+
+```{r}
+library(pROC)
+best_roc <- roc(train_h_ent_g_track_metro$win ~ probs_train)
+best_roc$auc
+
+#calculate the Gini score
+gini_best <- 2*(best_roc$auc - 0.5)
+gini_best
+```
+### Linearity
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+
+best_model_data <- subset(train_h_ent_g_track_metro, select= c(win , Jockey_Rating_D , scaled , sb_prembl , sb_postmbl, sb_tminus2))
+
+best_model_data$win <- as.numeric(best_model_data$win)
+
+predictors <- colnames(best_model_data)
+
+
+# Bind the logit and tidying the data for plot
+best_model_data <- best_model_data %>%
+  mutate(logit = log(probs_train/(1-probs_train))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+# Plotting
+ggplot(best_model_data, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+```{r}
+plot(best_adjusted, which = 4, id.n = 3)
+```
+
+```{r}
+library(broom)
+best_adjusted.data <- augment(best_model) %>% 
+  mutate(index = 1:n()) 
+
+```
+
+```{r}
+best_adjusted.data %>% top_n(3, .cooksd)
+```
+
+```{r}
+ggplot(best_adjusted.data, aes(index, .std.resid)) + 
+  geom_point(aes(color = win), alpha = .5) +
+  theme_bw()+
+  xlab(" Observation") +
+  ylab( "Standardised residuals") +
+  ggtitle("Residuals (test for independence) for best model")
+
+```
+
+```{r}
+# Looking for observations greater than three standard deviations from the mean
+best_adjusted.data %>% 
+  filter(abs(.std.resid) > 3)
+```
+
+```{r}
+# multi-colinearity present with sb_prembl and sb_postmbl
+car::vif(best_adjusted)
+```
+
+```{r}
+anova(best_adjusted, test="Chisq")
+```
+
+```{r}
+library(DHARMa)
+#simulated residual plots
+res=simulateResiduals(best_adjusted)
+plot(res)
+
+```
+
+```{r model with confints, include=TRUE}
+#log odds
+(est <- cbind(Estimate = coef(best_adjusted), confint(best_adjusted)))
+
+```
+
+```{r odds ratio,include=TRUE}
+#odds ratio
+(est_exp <- cbind(exp(est)))
+```
+```{r}
+summary(best_adjusted)
+```
+
+
+
+
+################################################################################
+##############################Appendix##########################################
+################################################################################
+### Running model on full data and finding bet performance
+```{r}
+# model 5
+
+merged_data_test$win <- as.numeric((merged_data_test$win))
+new_model_bet <- glm(win ~ Jockey_Rating + SPLS + class_ach_l3 + barrier_margadj + scaled + age_restrictions, family = binomial, data = merged_data)
+predictions6 <- predict(new_model_bet, newdata = merged_data_test, type = "response")
+
+
+  
+# Add predicted probabilities to the test data
+merged_data_test$probs <- predictions6
+
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df6 <- merged_data_test %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probs))
+
+# Merge the max_probs_df1 with the original dataframe to get the corresponding rows
+result_df6 <- merged_data_test %>%
+  inner_join(max_probs_df6, by = "raceid")
+
+# Select specific columns
+result_df6 <- result_df6[, c("sb_final","win", "pred_winner")]
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df6 <- result_df6 %>%
+  mutate(return = sb_final * win)
+
+model6_winnings<- sum(result_df6$return)
+print(model6_winnings)
+model6_profit<- model6_winnings-nrow(result_df6)
+print(model6_profit)
+model6_return_per_bet<- model6_profit/nrow(result_df6)
+print(model6_return_per_bet)
+```
+
+### full model bet return
+```{r}
+# accuracies - after up sampling (full(better) model)
+accuracies <- calculate_accuracies(model13_b, test_h_ent_s_track_metro)
+print(accuracies)
+
+```
+ after up sampling AIC model is best, test this on betting strategy
+ 
+```{r}
+# model 10
+predictions13 <- predict(sig_model, newdata = test_set, type = "response")
+
+# Add predicted probabilities to the test data
+test_set$probsfinal <- predictions13
+
+# Group by raceid and find the maximum value in predicted probability for each race
+max_probs_df_final <- test_set %>%
+  group_by(raceid) %>%
+  summarize(pred_winner = max(probsfinal))
+
+# Merge the max_probs_df9 with the original dataframe to get the corresponding rows
+result_df_final <- test_set %>%
+  inner_join(max_probs_df_final, by = "raceid")
+
+# Filter rows with the highest predicted probability for each raceid
+result_df_final <- result_df_final %>%
+  filter(probsfinal == pred_winner)
+
+# Select specific columns
+result_df_final <- result_df_final[, c("sb_final", "win", "pred_winner")]
+
+
+
+```
+
+```{r}
+# winnings for betting $1 on each race
+result_df_final <- result_df_final %>%
+  mutate(return = sb_final * win)
+
+model_final_winnings<- sum(result_df_final$return)
+print(model_final_winnings)
+model_final_profit<- model_final_winnings-nrow(result_df_final)
+print(model_final_profit)
+model_final_return_per_bet<- model_final_profit/nrow(result_df_final)
+print(model_final_return_per_bet)
+``` 
+
+
+
+
+```{r}
+################################################################################
+################################################################################
+############################APPNEDIX############################################
+################################################################################
+################################################################################
+
+################################################################################
+```
+
+### Feature engineering 
+
+```{r}
+
+
+# separate model data - data that is available before race starts
+
+# removing variables unknown before race
+exper_pre_race_model_data = subset(combined_data, select =-c( place, barrier_bin, probs, MEETRANKftime2,MEETRANKftime4, MEETRANKftime6, MEETRANKftime8, ftime2, ftime4, ftime6, ftime8, ftime10, marg600, margfin, pos600, itime86, itime64, t800_400, finish_position, XXX, XX, X, PPP, PP, P, MTC))
+
+# 60% train, 40% test
+total_rows <- nrow(exper_pre_race_model_data)
+train_rows <- round(0.6 * total_rows)
+
+#split data into train and test split, using sequential split
+exper_train_set <- exper_pre_race_model_data[1:train_rows, ]
+exper_test_set <- exper_pre_race_model_data[(train_rows + 1):total_rows, ]
+```
+
+```{r}
+exper_train_set <- exper_train_set %>%
+  mutate(time_to_last400 = finish_time - itime42 - e200ave)
+
+```
+
+
+```{r}
+last_400_model <- lm(time_to_last400 ~ WinRate + Jockey_Rating + SPLS + class_ach_l3 + barrier_margadj  + scaled + age_restrictions, data = exper_train_set, na.action=na.omit)
+summary(last_400_model)
+```
+
+
+```{r}
+
+last400_variable <- exper_train_set[, c("runner", "raceid", "time_to_last400", "finish_time", "t400_0", "marg400", "pos400")]
+
+
+
+#ratio of last 400m time to race time
+last400_variable <- last400_variable %>%
+  mutate(last400_ratio = t400_0/finish_time)
+```
+
+```{r}
+# best ratio last 400 for each race
+last400_variable <- last400_variable %>%
+  group_by(raceid) %>%
+  mutate(max_ratio_l400 = max(last400_ratio))
+```
+
+```{r}
+#ratio of last 400m time to race time/ max value for each race
+last400_variable <- last400_variable %>%
+  mutate(last400_performance_bench = last400_ratio/max_ratio_l400)
+```
+
+```{r}
+# find the average benchmark for each horse, where the horse has at least 2 races
+average_benchmark<- last400_variable %>%
+  group_by(runner) %>%
+  filter(n() > 1) %>%
+  summarise(avg_l400_benchmark = log(n())*mean(last400_performance_bench))
+```
+
+```{r}
+# merge data
+merged_data <- merge(exper_train_set, average_benchmark, by = "runner", all.x = TRUE)
+```
+
+```{r}
+merged_data$last400_benchmark <- merged_data$X
+```
+
+```{r}
+new_model = glm(win ~ Jockey_Rating + SPLS + class_ach_l3 + barrier_margadj  + scaled + age_restrictions + avg_l400_benchmark,data = merged_data, family = binomial, na.action=na.omit)
+summary(new_model)
+```
+
+```{r}
+# merge data
+merged_data_test <- merge(exper_test_set, average_benchmark, by = "runner", all.x = TRUE)
+```
+
+```{r}
+merged_data_test$last400_benchmark <- merged_data_test$X
+```
+
+```{r}
+merged_data_test_var = subset(merged_data_test, select= c(win, Jockey_Rating , SPLS , class_ach_l3 , barrier_margadj  , scaled , age_restrictions , avg_l400_benchmark))
+```
+
+
+```{r}
+#test model
+pred_last400_model <- predict(new_model, merged_data_test_var)
+```
+
+```{r}
+summary(pred_last400_model)
+```
+
+```{r}
+last400_probs = data.frame(probs = predict(new_model, 
+                                      newdata = merged_data_test_var,na.action=na.exclude,type = "response" 
+                                       ))
+```
+
+
+
+```{r}
+rowa <- rownames(last400_probs)
+
+rowb <- rownames(merged_data_test)
+
+#probs_data <- merge()
+
+predicted_probs <- merge(last400_probs, merged_data_test, by = 0, all.x = TRUE)
+```
+
+```{r}
+# place model odds and scaled odds from market in dataframe for analysis
+comparitive_probs <- subset(predicted_probs, select = c(raceid, runner, probs, scaled))
+```
+
+```{r}
+#re-order by ascending raceid
+comparitive_probs <- comparitive_probs[order(comparitive_probs$raceid),]
+```
+
+```{r}
+#find predicted winner for model
+comparitive_probs <- comparitive_probs %>%
+  group_by(raceid) %>%
+  mutate(model_win = as.integer(probs == max(probs)))
+```
+
+```{r}
+#find predicted winner for market
+comparitive_probs <- comparitive_probs %>%
+  group_by(raceid) %>%
+  mutate(market_win = as.integer(scaled == max(scaled)))
+```
+
+```{r}
+rowa <- rownames(last400_probs)
+
+rowb <- rownames(data)
+
+#probs_data <- merge()
+
+finish_pos <- merge(last400_probs, data, by = 0, all.x = TRUE)
+finish_pos <- finish_pos[order(finish_pos$raceid),]
+```
+
+```{r}
+comparitive_probs$finish_position = finish_pos$finish_position
+```
+
+```{r}
+colnames(comparitive_probs)[colnames(comparitive_probs) == "runner.x"] <- "runner"
+```
+
+```{r}
+# count correct for model
+comparison_matrix <- as.matrix(comparitive_probs$model_win == comparitive_probs$finish_position)
+
+# Count number of matches row by row
+comparitive_probs$model_accurate <- rowSums(comparison_matrix)
+#count correct for market
+
+model_accuracy <- comparitive_probs %>%
+  summarise(accuracy = sum(model_accurate)/length(model_accurate))
+
+
+#model accuracy
+model_accuracy = sum(comparitive_probs$model_accurate, na.rm = TRUE)/n_distinct(comparitive_probs$raceid)
+
+```
+
+
+
+```{r}
+# count correct for model
+comparison_matrix_market <- as.matrix(comparitive_probs$market_win == comparitive_probs$finish_position)
+
+# Count number of matches row by row
+comparitive_probs$market_accurate <- rowSums(comparison_matrix)
+#count correct for market
+
+market_accuracy <- comparitive_probs %>%
+  summarise(accuracy = sum(market_accurate)/length(market_accurate))
+
+#market accuracy
+market_accuracy = sum(comparitive_probs$market_accurate, na.rm = TRUE)/n_distinct(comparitive_probs$raceid)
+
+
+
+```
+
+### Entropy measures and approaches
+```{r}
+#https://cran.r-project.org/web/packages/MIAmaxent/MIAmaxent.pdf
+library(MIAmaxent)
+
+first_column <- "win"
+
+# re-order such that win is first in dataframe
+MIA_train_data <- merged_data[, c(first_column, setdiff(names(merged_data), first_column))]
+
+# transform boolean to binary values
+MIA_train_data$win <- as.integer(MIA_train_data$win)
+
+# remove engineered variable for now as it has NA's
+MIA_train_data <- subset(MIA_train_data, select = - avg_l400_benchmark)
+```
+
+```{r}
+MIA_train_data <- sample_n(MIA_train_data, 10000)
+
+```
+
+
+
+```{r}
+MIA_experiment_data <- deriveVars(MIA_train_data, transformtype = c("L", "M" ), algorithm = "LR")
+```
+
+```{r}
+#Select explanatory variables
+#significant numerical variables in non-market model
+el1 <- as.integer(MIA_train_data$win)
+
+selectDVforEVdata  = list(el1,MIA_experiment_data[["dvdata"]][["distance"]][["distance_M"]], MIA_experiment_data[["dvdata"]][["runners"]][["runners_M"]], MIA_experiment_data[["dvdata"]][["NRUNS"]][["NRUNS_M"]], MIA_experiment_data[["dvdata"]][["DSLR"]][["DSLR_M"]], MIA_experiment_data[["dvdata"]][["WinRate"]][["WinRate_M"]], MIA_experiment_data[["dvdata"]][["Jockey_Rating"]][["Jockey_Rating_M"]],MIA_experiment_data[["dvdata"]][["Jockey_Rating_D"]][["Jockey_Rating_D_M"]], MIA_experiment_data[["dvdata"]][["ExpPir"]][["ExpPir_M"]], MIA_experiment_data[["dvdata"]][["DSLR1"]][["DSLR1_M"]], MIA_experiment_data[["dvdata"]][["PlaceRate"]][["PlaceRate_M"]], MIA_experiment_data[["dvdata"]][["TrackWin"]][["TrackWin_M"]], MIA_experiment_data[["dvdata"]][["GradeWin"]][["GradeWin_M"]], MIA_experiment_data[["dvdata"]][["barrier_margadj"]][["barrier_margadj_M"]], MIA_experiment_data[["dvdata"]][["QBU"]][["QBU_M"]], MIA_experiment_data[["dvdata"]][["age_3"]][["age_3_M"]], MIA_experiment_data[["dvdata"]][["DIST_LS"]][["DIST_LS_M"]], MIA_experiment_data[["dvdata"]][["railf"]][["railf_M"]], MIA_experiment_data[["dvdata"]][["race_t6"]][["race_t6_M"]], MIA_experiment_data[["dvdata"]][["race_l6"]][["race_l6_M"]], MIA_experiment_data[["dvdata"]][["race_time"]][["race_time_M"]], MIA_experiment_data[["dvdata"]][["race_pace"]][["race_pace_M"]])
+```
+
+```{r}
+non_null_predicate <- function(x) !is.null(x)
+
+# Use Filter to remove null elements from the list
+filtered_list <- Filter(non_null_predicate, selectDVforEVdata)
+```
+
+```{r}
+# Check data types
+class_of_elements <- sapply(filtered_list[-1], class)
+if (!all(class_of_elements == "data.frame")) {
+  stop("Not all elements in dvdata[-1] are data frames.")
+}
+```
+
+```{r}
+to_dataframe <- function(x) {
+  if (is.numeric(x)) {
+    return(data.frame(value = x))
+  } else {
+    return(x)
+  }
+}
+
+# Apply the conversion function to each element of the list, except the first one
+list_of_dataframes <- lapply(filtered_list[-1], to_dataframe)
+
+# Leave the first element of the list unchanged
+list_of_dataframes <- c(list(filtered_list[[1]]), list_of_dataframes)
+
+```
+
+```{r}
+filtered_list <- as.data.frame(lapply(filtered_list[1], as.integer))
+```
+
+
+
+
+```{r}
+selectDV <- selectDVforEV(list_of_dataframes, alpha = 0.05, algorithm = "LR" )
+```
+
+```{r}
+#select Derived variables, Explanaotry variables
+summary(selectDV$dvdata)
+
+```
+
+```{r}
+# select explanatory variables
+EVselect <- selectEV(selectDV$dvdata, alpha = 0.05,algorithm = "LR")
+
+
+```
+
+```{r}
+plotFOP(MIA_train_data, "handicap")
+```
+
+```{r}
+plotFOP(MIA_train_data, "Jockey_Rating")
+```
+
+```{r}
+plotFOP(MIA_train_data, "NRUNS")
+```
+
+```{r}
+plotFOP(MIA_train_data, "distance")
+```
+
+
+```{r}
+plotFOP(MIA_train_data,"ExpPir")
+```
+
+```{r}
+
+
+
+
+
+#group by race
+
+data_clean$raceid
+races <- unique(data_clean$raceid)
+head(races)
+for(i in 1:length(races)){
+  filter<-races[i]==data_clean$raceid
+  score<-1/data_clean$sb_final[filter]
+  scoreScaled<-score/sum(score)
+  data_clean$scaled[filter]<-scoreScaled
+}
+
+###############################################################################
+#inefficient data cleaning based upon conditions #
+
+
+
+# remove races where finish position = -99
+remove_rows_pos <- which(data_clean$finish_position == -99)
+races_remove_pos <- data_clean$raceid[remove_rows_pos]
+data_clean <- subset(data_clean, !(raceid %in% races_remove_pos))
+
+
+# remove races where finish time = -999 or 999
+remove_rows_time <- which(data_clean$finish_time == c(-999,999))
+races_remove_time <- data_clean$raceid[remove_rows_time]
+data_clean <- subset(data_clean, !(raceid %in% races_remove_time))
+
+############################################################################
+
+
+################################################################################
+```
+
+
+
+
+
+
+
